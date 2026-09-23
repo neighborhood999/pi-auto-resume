@@ -1,0 +1,52 @@
+{
+  "name": "pi-auto-resume",
+  "version": "1.0.0",
+  "description": "Wait for provider usage-limit reset and resume the interrupted task automatically",
+  "keywords": [
+    "auto-resume",
+    "pi",
+    "pi-package"
+  ],
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "scripts": {
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --deny-warnings src test",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@earendil-works/pi-tui": "0.84.4",
+    "@types/node": "24.13.3",
+    "husky": "9.1.7",
+    "lint-staged": "17.4.1",
+    "oxfmt": "0.65.0",
+    "oxlint": "1.80.0",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "lint-staged": {
+    "*.{js,jsx,mjs,cjs,ts,tsx,json,jsonc,md,mdx,yaml,yml}": "oxfmt --write"
+  },
+  "packageManager": "pnpm@11.20.0",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+# Audited dependency scripts: esbuild installs the native binary used by
+# the toolchain; the other two only run package preparation/compatibility
+# hooks and are intentionally denied.
+allowBuilds:
+  '@google/genai': false
+  esbuild: true
+  protobufjs: false

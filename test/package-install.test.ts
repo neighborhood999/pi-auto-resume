@@ -20,9 +20,10 @@ test('npm install --omit=dev succeeds without the Husky dev dependency', () => {
         scripts: packageManifest.scripts,
       }),
     );
-    const result = spawnSync('npm', ['install', '--omit=dev', '--offline', '--no-package-lock'], {
+    const result = spawnSync('npm install --omit=dev --offline --no-package-lock', {
       cwd: directory,
       encoding: 'utf8',
+      shell: true,
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   } finally {

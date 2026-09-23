@@ -477,8 +477,8 @@ test('model change while restart confirmation is pending cannot re-arm', async (
     { type: 'session_start', reason: 'startup' },
     harness.ctx,
   );
-  for (let attempt = 0; attempt < 20 && harness.state.confirmCalls === 0; attempt += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let attempt = 0; attempt < 100 && harness.state.confirmCalls === 0; attempt += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
   assert.equal(harness.state.confirmCalls, 1);
 

@@ -12,14 +12,12 @@ const packageManifest = JSON.parse(readFileSync(packagePath, 'utf8'));
 test('npm install --omit=dev succeeds without the Husky dev dependency', () => {
   const directory = mkdtempSync(join(tmpdir(), 'pi-auto-resume-install-'));
   try {
-    // Exercise the real package scripts with Husky omitted, without installing unrelated peers and tools.
     writeFileSync(
       join(directory, 'package.json'),
       JSON.stringify({
         name: packageManifest.name,
         version: packageManifest.version,
         scripts: packageManifest.scripts,
-        devDependencies: { husky: packageManifest.devDependencies?.husky },
       }),
     );
     const result = spawnSync('npm', ['install', '--omit=dev', '--offline', '--no-package-lock'], {

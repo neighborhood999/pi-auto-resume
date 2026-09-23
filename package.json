@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
-    "prepare": "husky"
+    "hooks:install": "husky"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.4",

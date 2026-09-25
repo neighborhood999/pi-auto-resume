@@ -1,5 +1,6 @@
 export type ProviderFamily = 'codex' | 'anthropic';
 
+/** Origin of a known usage-limit reset; `unrecorded` denotes a legacy pending entry whose source was not saved. */
 export type ResetSource = 'metadata' | 'header' | 'body' | 'usage-api' | 'unrecorded';
 
 export type ResetInfo = {

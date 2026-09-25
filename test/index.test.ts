@@ -22,6 +22,7 @@ type TestEntry = {
 
 type ContextState = {
   model: TestModel | undefined;
+  idle: boolean;
   readonly entries: TestEntry[];
   readonly hasUI: boolean;
   readonly notifications: string[];
@@ -115,7 +116,7 @@ function makeContext(state: ContextState): ExtensionContext {
     },
     scopedModels: [],
     thinkingLevel: 'off',
-    isIdle: () => true,
+    isIdle: () => state.idle,
     isProjectTrusted: () => true,
     signal: undefined,
     abort: () => undefined,
@@ -143,6 +144,7 @@ function makeHarness(
   const notifications: string[] = [];
   const state: ContextState = {
     model,
+    idle: true,
     entries: options?.entries ? [...options.entries] : [],
     hasUI: options?.hasUI ?? true,
     notifications,
@@ -183,7 +185,15 @@ function assistantMessage(model: TestModel, stopReason: string): Record<string, 
 async function resumeNow(harness: ReturnType<typeof makeHarness>): Promise<void> {
   assert.ok(harness.api.command);
   await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
+  const prompt = harness.state.sentMessages.at(-1);
+  assert.ok(prompt);
+  await harness.api.emit('before_agent_start', { type: 'before_agent_start', prompt }, harness.ctx);
   await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: prompt }] } },
+    harness.ctx,
+  );
 }
 
 function resolvedCount(harness: ReturnType<typeof makeHarness>): number {
@@ -338,6 +348,89 @@ test('first successful assistant message confirms the resume before settlement',
   assert.equal(harness.state.bells, 1);
   assert.equal(resolvedCount(harness), 1);
   assert.equal(harness.state.sentMessages.length, 1);
+});
+
+test('an assistant response before the resume prompt starts cannot confirm it', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model);
+  await armKnownLimit(harness);
+  await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
+  assert.equal(harness.state.sentMessages.length, 1);
+
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: assistantMessage(model, 'stop') },
+    harness.ctx,
+  );
+  assert.equal(resolvedCount(harness), 0);
+  assert.equal(harness.state.bells, 0);
+
+  const prompt = harness.state.sentMessages[0];
+  assert.ok(prompt);
+  await harness.api.emit('before_agent_start', { type: 'before_agent_start', prompt }, harness.ctx);
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: prompt }] } },
+    harness.ctx,
+  );
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: assistantMessage(model, 'stop') },
+    harness.ctx,
+  );
+  assert.equal(resolvedCount(harness), 1);
+  assert.equal(harness.state.bells, 1);
+});
+
+test('an in-flight user turn at timer wake cannot announce a resume', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model, {
+    entries: [
+      {
+        customType: 'auto-resume/pending',
+        data: {
+          schemaVersion: 1,
+          provider: model.provider,
+          modelId: model.id,
+          model: model.name,
+          family: 'anthropic',
+          wakeAt: Date.now() - 1,
+          attempt: 1,
+        },
+      },
+    ],
+  });
+  await harness.api.emit(
+    'session_start',
+    { type: 'session_start', reason: 'startup' },
+    harness.ctx,
+  );
+  harness.state.idle = false;
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(harness.state.statuses.get('autoresume'), '⏸ limit · checking…');
+  assert.equal(harness.state.sentMessages.length, 0);
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: assistantMessage(model, 'stop') },
+    harness.ctx,
+  );
+  assert.equal(resolvedCount(harness), 0);
+  assert.equal(harness.state.bells, 0);
+  assert.equal(harness.state.notifications.includes('✓ usage limit lifted — resuming task'), false);
+
+  harness.state.idle = true;
+  await harness.api.emit(
+    'agent_end',
+    { type: 'agent_end', messages: [assistantMessage(model, 'stop')] },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+  assert.equal(resolvedCount(harness), 1);
+  assert.equal(harness.state.sentMessages.length, 0);
+  assert.equal(harness.state.bells, 0);
 });
 
 test('non-success messages during a resume do not confirm it', async () => {

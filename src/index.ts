@@ -89,6 +89,15 @@ export default function autoResume(
   let modelSelectionGeneration = 0;
   let enablementGeneration = 0;
   let sessionAbort: AbortController | undefined;
+  let queuedResumePrompt: string | undefined;
+  let resumePromptPreflight = false;
+  let resumedRunStarted = false;
+
+  function clearResumeConfirmation(): void {
+    queuedResumePrompt = undefined;
+    resumePromptPreflight = false;
+    resumedRunStarted = false;
+  }
 
   function enabled(): boolean {
     return isAutoResumeEnabled(config, sessionOverride);
@@ -97,6 +106,9 @@ export default function autoResume(
   function dispatch(event: ResumeScheduleEvent, ctx: ExtensionContext): void {
     const previous = schedule;
     schedule = nextResumeScheduleState(previous, event, Date.now(), config);
+    if (previous.phase === 'resuming' && schedule.phase !== 'resuming') {
+      clearResumeConfirmation();
+    }
 
     if (schedule.phase === 'idle') {
       clearTargetModel();
@@ -258,7 +270,13 @@ export default function autoResume(
       );
       return;
     }
+    // An in-flight user turn owns its outcome: settlement will disarm a
+    // successful wait or re-arm a limit hit. Do not submit while Pi is busy.
+    if (!ctx.isIdle()) {
+      return;
+    }
     const prompt = config.resumePrompt ?? DEFAULT_RESUME_PROMPT;
+    queuedResumePrompt = prompt;
     try {
       pi.sendUserMessage(prompt);
     } catch (cause: unknown) {
@@ -323,6 +341,12 @@ export default function autoResume(
     }
   });
 
+  pi.on('before_agent_start', (event) => {
+    if (schedule.phase === 'resuming' && event.prompt === queuedResumePrompt) {
+      resumePromptPreflight = true;
+    }
+  });
+
   // Pi emits agent_start for both agentLoop and agentLoopContinue; automatic
   // retries therefore get a fresh detector attempt boundary.
   pi.on('agent_start', () => {
@@ -372,7 +396,26 @@ export default function autoResume(
   });
 
   pi.on('message_end', (event, ctx) => {
-    if (schedule.phase !== 'resuming' || !isSuccessfulAssistant(event.message, targetModel)) {
+    if (schedule.phase !== 'resuming') {
+      return;
+    }
+    const message = event.message;
+    if (
+      resumePromptPreflight &&
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.length === 1 &&
+      message.content[0]?.type === 'text' &&
+      message.content[0].text === queuedResumePrompt
+    ) {
+      // Pi emits the user message only after the run has actually started.
+      // Later automatic retries belong to this same resume attempt.
+      resumedRunStarted = true;
+      queuedResumePrompt = undefined;
+      resumePromptPreflight = false;
+      return;
+    }
+    if (!resumedRunStarted || !isSuccessfulAssistant(message, targetModel)) {
       return;
     }
     dispatch({ type: 'confirmed' }, ctx);
@@ -491,6 +534,7 @@ export default function autoResume(
     tearDown(ctx);
     schedule = { phase: 'idle' };
     clearTargetModel();
+    clearResumeConfirmation();
     lifecycleGeneration += 1;
     enablementGeneration += 1;
     sessionAbort?.abort();
@@ -503,6 +547,7 @@ export default function autoResume(
     tearDown(ctx);
     schedule = { phase: 'idle' };
     clearTargetModel();
+    clearResumeConfirmation();
     lifecycleGeneration += 1;
     modelSelectionGeneration += 1;
     enablementGeneration += 1;

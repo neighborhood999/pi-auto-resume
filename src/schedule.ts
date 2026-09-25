@@ -17,7 +17,12 @@ export type ResumeScheduleState =
 
 /** Events the composition root reports to the schedule reducer. */
 export type ResumeScheduleEvent =
-  | { readonly type: 'limit'; readonly hit: UsageLimitHit }
+  | {
+      readonly type: 'limit';
+      readonly hit: UsageLimitHit;
+      /** Sample in [0, 1). */
+      readonly jitter: number;
+    }
   | {
       readonly type: 'restore';
       readonly hit: UsageLimitHit;
@@ -25,6 +30,7 @@ export type ResumeScheduleEvent =
       readonly attempt: number;
     }
   | { readonly type: 'settled-ok' }
+  | { readonly type: 'confirmed' }
   | { readonly type: 'wake' }
   | { readonly type: 'cancel' };
 
@@ -43,6 +49,7 @@ export function isAutoResumeEnabled(
 export type AutoResumeConfig = {
   readonly enabled: boolean;
   readonly bufferMs: number;
+  readonly jitterMs: number;
   readonly pollIntervalMs: number;
   readonly maxAttempts: number;
   readonly resumePrompt?: string | undefined;
@@ -52,6 +59,7 @@ export type AutoResumeConfig = {
 export const DEFAULT_CONFIG: AutoResumeConfig = {
   enabled: true,
   bufferMs: 45_000,
+  jitterMs: 15_000,
   pollIntervalMs: 600_000,
   maxAttempts: 6,
 };
@@ -78,7 +86,7 @@ export function nextResumeScheduleState(
         return {
           phase: 'waiting',
           hit: event.hit,
-          wakeAt: deriveWakeAt(event.hit, now, config),
+          wakeAt: deriveWakeAt(event.hit, event.jitter, now, config),
           attempt,
         };
       }
@@ -86,14 +94,14 @@ export function nextResumeScheduleState(
         return {
           phase: 'waiting',
           hit: event.hit,
-          wakeAt: deriveWakeAt(event.hit, now, config),
+          wakeAt: deriveWakeAt(event.hit, event.jitter, now, config),
           attempt: state.attempt,
         };
       }
       return {
         phase: 'waiting',
         hit: event.hit,
-        wakeAt: deriveWakeAt(event.hit, now, config),
+        wakeAt: deriveWakeAt(event.hit, event.jitter, now, config),
         attempt: 1,
       };
     }
@@ -111,6 +119,12 @@ export function nextResumeScheduleState(
     case 'settled-ok': {
       return { phase: 'idle' };
     }
+    case 'confirmed': {
+      if (state.phase === 'resuming') {
+        return { phase: 'idle' };
+      }
+      return state;
+    }
     case 'wake': {
       if (state.phase === 'waiting') {
         return { phase: 'resuming', hit: state.hit, attempt: state.attempt };
@@ -123,9 +137,14 @@ export function nextResumeScheduleState(
   }
 }
 
-function deriveWakeAt(hit: UsageLimitHit, now: number, config: AutoResumeConfig): number {
+function deriveWakeAt(
+  hit: UsageLimitHit,
+  jitter: number,
+  now: number,
+  config: AutoResumeConfig,
+): number {
   if (hit.resetAt !== undefined) {
-    return hit.resetAt + config.bufferMs;
+    return hit.resetAt + config.bufferMs + Math.floor(jitter * config.jitterMs);
   }
   return now + config.pollIntervalMs;
 }

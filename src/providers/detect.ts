@@ -134,7 +134,7 @@ export function createUsageLimitDetector(): UsageLimitDetector {
       }
 
       if (currentRunError.resetsAt !== undefined) {
-        return { provider: family, resetAt: currentRunError.resetsAt };
+        return { provider: family, resetAt: currentRunError.resetsAt, source: 'metadata' };
       }
 
       const headerReset =
@@ -144,13 +144,13 @@ export function createUsageLimitDetector(): UsageLimitDetector {
           : parseAnthropicHeaders(fresh.headers, fresh.at));
 
       if (headerReset) {
-        return { provider: family, resetAt: headerReset };
+        return { provider: family, resetAt: headerReset, source: 'header' };
       }
 
       if (family === 'codex') {
         const bodyReset = parseCodexErrorBody(currentRunError.errorMessage, now);
         if (bodyReset) {
-          return { provider: family, resetAt: bodyReset };
+          return { provider: family, resetAt: bodyReset, source: 'body' };
         }
       }
 

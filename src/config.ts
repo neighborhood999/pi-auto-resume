@@ -47,6 +47,7 @@ export function parseConfig(input: unknown): LoadConfigResult {
 
   const enabled = Reflect.get(input, 'enabled');
   const bufferMs = Reflect.get(input, 'bufferMs');
+  const jitterMs = Reflect.get(input, 'jitterMs');
   const pollIntervalMs = Reflect.get(input, 'pollIntervalMs');
   const maxAttempts = Reflect.get(input, 'maxAttempts');
   const resumePrompt = Reflect.get(input, 'resumePrompt');
@@ -59,6 +60,10 @@ export function parseConfig(input: unknown): LoadConfigResult {
         typeof bufferMs === 'number' && Number.isFinite(bufferMs) && bufferMs > 0
           ? bufferMs
           : DEFAULT_CONFIG.bufferMs,
+      jitterMs:
+        typeof jitterMs === 'number' && Number.isFinite(jitterMs) && jitterMs >= 0
+          ? jitterMs
+          : DEFAULT_CONFIG.jitterMs,
       pollIntervalMs:
         typeof pollIntervalMs === 'number' && Number.isFinite(pollIntervalMs) && pollIntervalMs > 0
           ? pollIntervalMs
@@ -81,6 +86,9 @@ export async function saveAutoResumeConfig(config: AutoResumeConfig): Promise<Sa
   }
   if (config.bufferMs !== DEFAULT_CONFIG.bufferMs) {
     stored['bufferMs'] = config.bufferMs;
+  }
+  if (config.jitterMs !== DEFAULT_CONFIG.jitterMs) {
+    stored['jitterMs'] = config.jitterMs;
   }
   if (config.pollIntervalMs !== DEFAULT_CONFIG.pollIntervalMs) {
     stored['pollIntervalMs'] = config.pollIntervalMs;

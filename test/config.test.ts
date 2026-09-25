@@ -68,3 +68,12 @@ test('resumePrompt is preserved', () => {
   }
   assert.equal(result.config.resumePrompt, 'custom prompt');
 });
+
+test('jitterMs accepts zero and rejects negative or non-finite values', () => {
+  const zero = parseConfig({ jitterMs: 0 });
+  assert.ok(zero.ok && zero.config.jitterMs === 0);
+  for (const jitterMs of [-1, Infinity, 'soon']) {
+    const result = parseConfig({ jitterMs });
+    assert.ok(result.ok && result.config.jitterMs === DEFAULT_CONFIG.jitterMs);
+  }
+});

@@ -28,14 +28,15 @@ const DEFAULT_RESUME_PROMPT =
 const RESUME_NOTICE = '✓ usage limit lifted — resuming task';
 const PENDING_ENTRY_TYPE = 'auto-resume/pending';
 const RESOLVED_ENTRY_TYPE = 'auto-resume/resolved';
-const NOTICE_MESSAGE_TYPE = 'auto-resume/notice';
 const STATUS_KEY = 'autoresume';
 const USAGE_API_TIMEOUT_MS = 10_000;
 
 /** Side effects that are injectable at the composition-root boundary. */
 export type AutoResumeDependencies = {
-  /** Ring once after a resumed turn settles successfully. */
+  /** Ring once when the resumed run first succeeds. */
   readonly terminalBell?: () => void;
+  /** Sample in [0, 1) for wake jitter. */
+  readonly random?: () => number;
   /** Report a low-noise, sanitized diagnostic for a failed usage lookup. */
   readonly diagnostic?: (message: string) => void;
 };
@@ -43,7 +44,6 @@ export type AutoResumeDependencies = {
 type TargetModel = {
   readonly provider: string;
   readonly modelId: string;
-  /** Display-only model name; never used for identity checks. */
   readonly displayName: string;
 };
 
@@ -75,6 +75,7 @@ export default function autoResume(
   const detector = createUsageLimitDetector();
   const terminalBell = dependencies.terminalBell ?? createTerminalBell();
   const diagnostic = dependencies.diagnostic ?? ((message: string) => console.warn(message));
+  const random = dependencies.random ?? Math.random;
   let schedule: ResumeScheduleState = { phase: 'idle' };
   let config: AutoResumeConfig = DEFAULT_CONFIG;
   let sessionOverride: SessionEnablement = 'Inherit';
@@ -88,6 +89,15 @@ export default function autoResume(
   let modelSelectionGeneration = 0;
   let enablementGeneration = 0;
   let sessionAbort: AbortController | undefined;
+  let queuedResumePrompt: string | undefined;
+  let resumePromptPreflight = false;
+  let resumedRunStarted = false;
+
+  function clearResumeConfirmation(): void {
+    queuedResumePrompt = undefined;
+    resumePromptPreflight = false;
+    resumedRunStarted = false;
+  }
 
   function enabled(): boolean {
     return isAutoResumeEnabled(config, sessionOverride);
@@ -96,6 +106,9 @@ export default function autoResume(
   function dispatch(event: ResumeScheduleEvent, ctx: ExtensionContext): void {
     const previous = schedule;
     schedule = nextResumeScheduleState(previous, event, Date.now(), config);
+    if (previous.phase === 'resuming' && schedule.phase !== 'resuming') {
+      clearResumeConfirmation();
+    }
 
     if (schedule.phase === 'idle') {
       clearTargetModel();
@@ -178,7 +191,6 @@ export default function autoResume(
         overlay: true,
         overlayOptions: {
           anchor: 'top-right',
-          // Intentional settled HUD choice: keep the fixed overlay at 46 cols.
           width: 46,
           offsetY: 1,
           nonCapturing: true,
@@ -258,7 +270,13 @@ export default function autoResume(
       );
       return;
     }
+    // An in-flight user turn owns its outcome: settlement will disarm a
+    // successful wait or re-arm a limit hit. Do not submit while Pi is busy.
+    if (!ctx.isIdle()) {
+      return;
+    }
     const prompt = config.resumePrompt ?? DEFAULT_RESUME_PROMPT;
+    queuedResumePrompt = prompt;
     try {
       pi.sendUserMessage(prompt);
     } catch (cause: unknown) {
@@ -323,6 +341,12 @@ export default function autoResume(
     }
   });
 
+  pi.on('before_agent_start', (event) => {
+    if (schedule.phase === 'resuming' && event.prompt === queuedResumePrompt) {
+      resumePromptPreflight = true;
+    }
+  });
+
   // Pi emits agent_start for both agentLoop and agentLoopContinue; automatic
   // retries therefore get a fresh detector attempt boundary.
   pi.on('agent_start', () => {
@@ -371,6 +395,34 @@ export default function autoResume(
     });
   });
 
+  pi.on('message_end', (event, ctx) => {
+    if (schedule.phase !== 'resuming') {
+      return;
+    }
+    const message = event.message;
+    if (
+      resumePromptPreflight &&
+      message.role === 'user' &&
+      Array.isArray(message.content) &&
+      message.content.length === 1 &&
+      message.content[0]?.type === 'text' &&
+      message.content[0].text === queuedResumePrompt
+    ) {
+      // Pi emits the user message only after the run has actually started.
+      // Later automatic retries belong to this same resume attempt.
+      resumedRunStarted = true;
+      queuedResumePrompt = undefined;
+      resumePromptPreflight = false;
+      return;
+    }
+    if (!resumedRunStarted || !isSuccessfulAssistant(message, targetModel)) {
+      return;
+    }
+    dispatch({ type: 'confirmed' }, ctx);
+    terminalBell();
+    ctx.ui.notify(RESUME_NOTICE, 'info');
+  });
+
   pi.on('agent_settled', async (_event, ctx) => {
     const hit = detector.classify(Date.now());
     if (!enabled()) {
@@ -405,17 +457,12 @@ export default function autoResume(
         }
         return;
       }
-      dispatch({ type: 'limit', hit: resolved }, ctx);
+      dispatch({ type: 'limit', hit: resolved, jitter: random() }, ctx);
       if (schedule.phase === 'idle') {
         ctx.ui.notify('Auto-resume: max attempts reached, giving up.', 'warning');
       }
     } else if (schedule.phase !== 'idle') {
-      const wasResuming = schedule.phase === 'resuming';
       dispatch({ type: 'settled-ok' }, ctx);
-      if (wasResuming) {
-        terminalBell();
-        sendResumeNotice(pi);
-      }
     } else {
       clearTargetModel();
     }
@@ -467,7 +514,7 @@ export default function autoResume(
         return undefined;
       }
       if (result.ok) {
-        return { provider: family, resetAt: result.reset.at };
+        return { provider: family, resetAt: result.reset.at, source: result.reset.source };
       }
       diagnostic(
         `pi-auto-resume: usage API fallback unavailable (${family}; ${sanitizeDiagnostic(result.error)}).`,
@@ -487,6 +534,7 @@ export default function autoResume(
     tearDown(ctx);
     schedule = { phase: 'idle' };
     clearTargetModel();
+    clearResumeConfirmation();
     lifecycleGeneration += 1;
     enablementGeneration += 1;
     sessionAbort?.abort();
@@ -499,6 +547,7 @@ export default function autoResume(
     tearDown(ctx);
     schedule = { phase: 'idle' };
     clearTargetModel();
+    clearResumeConfirmation();
     lifecycleGeneration += 1;
     modelSelectionGeneration += 1;
     enablementGeneration += 1;
@@ -552,8 +601,6 @@ export default function autoResume(
       displayName: pending.model,
     };
 
-    // Mismatch resolution intentionally happens before confirmation. A stale
-    // pending record must not prompt the user or arm against another model.
     if (family !== pending.family || !targetMatches(ctx, pendingTarget)) {
       pi.appendEntry(RESOLVED_ENTRY_TYPE, {});
       ctx.ui.notify(
@@ -686,9 +733,10 @@ export default function autoResume(
         if (schedule.phase === 'idle') {
           ctx.ui.notify(`Auto-resume: ${isEnabled ? 'enabled' : 'disabled'}, idle.`, 'info');
         } else if (schedule.phase === 'waiting') {
-          const until = schedule.hit.resetAt
-            ? new Date(schedule.wakeAt).toLocaleTimeString()
-            : 'unknown';
+          const until =
+            schedule.hit.resetAt === undefined
+              ? 'unknown'
+              : `${new Date(schedule.wakeAt).toLocaleTimeString()}, reset via ${schedule.hit.source}`;
           ctx.ui.notify(
             `Auto-resume: waiting (attempt ${schedule.attempt}/${config.maxAttempts}, resumes ~${until}).`,
             'info',
@@ -707,20 +755,16 @@ export default function autoResume(
   });
 }
 
-function sendResumeNotice(pi: ExtensionAPI): void {
-  try {
-    pi.sendMessage(
-      {
-        customType: NOTICE_MESSAGE_TYPE,
-        content: RESUME_NOTICE,
-        display: true,
-      },
-      { triggerTurn: false },
-    );
-  } catch {
-    // The resumed settlement is already complete; a transcript rendering
-    // failure must not re-arm or otherwise change the schedule.
-  }
+function isSuccessfulAssistant(message: unknown, target: TargetModel | undefined): boolean {
+  const record = message as Record<string, unknown> | null | undefined;
+  return (
+    target !== undefined &&
+    record?.['role'] === 'assistant' &&
+    record['provider'] === target.provider &&
+    record['model'] === target.modelId &&
+    record['stopReason'] !== 'error' &&
+    record['stopReason'] !== 'aborted'
+  );
 }
 
 function makeTargetModel(

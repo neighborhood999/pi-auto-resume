@@ -9,12 +9,17 @@ import {
 } from '../src/schedule.ts';
 
 const NOW = 1_700_000_000_000;
-const HIT: UsageLimitHit = { provider: 'codex', resetAt: NOW + 3600_000 };
+const HIT: UsageLimitHit = { provider: 'codex', resetAt: NOW + 3600_000, source: 'header' };
 const HIT_UNKNOWN: UsageLimitHit = { provider: 'anthropic', resetAt: undefined };
 const IDLE: ResumeScheduleState = { phase: 'idle' };
 
 test('limit from idle → waiting with attempt 1', () => {
-  const state = nextResumeScheduleState(IDLE, { type: 'limit', hit: HIT }, NOW, DEFAULT_CONFIG);
+  const state = nextResumeScheduleState(
+    IDLE,
+    { type: 'limit', hit: HIT, jitter: 0 },
+    NOW,
+    DEFAULT_CONFIG,
+  );
   assert.equal(state.phase, 'waiting');
   if (state.phase !== 'waiting') {
     return;
@@ -27,7 +32,7 @@ test('limit from idle → waiting with attempt 1', () => {
 test('limit with unknown reset → wakeAt uses pollIntervalMs', () => {
   const state = nextResumeScheduleState(
     IDLE,
-    { type: 'limit', hit: HIT_UNKNOWN },
+    { type: 'limit', hit: HIT_UNKNOWN, jitter: 0 },
     NOW,
     DEFAULT_CONFIG,
   );
@@ -104,10 +109,10 @@ test('settled-ok from any phase → idle', () => {
 
 test('limit while resuming → waiting with attempt+1', () => {
   const resuming: ResumeScheduleState = { phase: 'resuming', hit: HIT, attempt: 2 };
-  const newHit: UsageLimitHit = { provider: 'codex', resetAt: NOW + 7200_000 };
+  const newHit: UsageLimitHit = { provider: 'codex', resetAt: NOW + 7200_000, source: 'header' };
   const state = nextResumeScheduleState(
     resuming,
-    { type: 'limit', hit: newHit },
+    { type: 'limit', hit: newHit, jitter: 0 },
     NOW,
     DEFAULT_CONFIG,
   );
@@ -126,10 +131,10 @@ test('limit while waiting re-derives wakeAt without incrementing attempt', () =>
     wakeAt: NOW + 100_000,
     attempt: 2,
   };
-  const newHit: UsageLimitHit = { provider: 'codex', resetAt: NOW + 5000_000 };
+  const newHit: UsageLimitHit = { provider: 'codex', resetAt: NOW + 5000_000, source: 'header' };
   const state = nextResumeScheduleState(
     waiting,
-    { type: 'limit', hit: newHit },
+    { type: 'limit', hit: newHit, jitter: 0 },
     NOW,
     DEFAULT_CONFIG,
   );
@@ -144,7 +149,12 @@ test('limit while waiting re-derives wakeAt without incrementing attempt', () =>
 test('max attempts exceeded → idle', () => {
   const config = { ...DEFAULT_CONFIG, maxAttempts: 2 };
   const resuming: ResumeScheduleState = { phase: 'resuming', hit: HIT, attempt: 2 };
-  const state = nextResumeScheduleState(resuming, { type: 'limit', hit: HIT }, NOW, config);
+  const state = nextResumeScheduleState(
+    resuming,
+    { type: 'limit', hit: HIT, jitter: 0 },
+    NOW,
+    config,
+  );
   assert.equal(state.phase, 'idle');
 });
 
@@ -168,4 +178,45 @@ test('wake while resuming is ignored', () => {
   const resuming: ResumeScheduleState = { phase: 'resuming', hit: HIT, attempt: 1 };
   const state = nextResumeScheduleState(resuming, { type: 'wake' }, NOW, DEFAULT_CONFIG);
   assert.equal(state.phase, 'resuming');
+});
+
+test('known reset adds the sampled jitter after the buffer', () => {
+  const state = nextResumeScheduleState(
+    IDLE,
+    { type: 'limit', hit: HIT, jitter: 0.5 },
+    NOW,
+    DEFAULT_CONFIG,
+  );
+  assert.equal(state.phase, 'waiting');
+  if (state.phase !== 'waiting') {
+    return;
+  }
+  assert.equal(state.wakeAt, HIT.resetAt! + DEFAULT_CONFIG.bufferMs + DEFAULT_CONFIG.jitterMs / 2);
+});
+
+test('unknown reset ignores jitter and polls', () => {
+  const state = nextResumeScheduleState(
+    IDLE,
+    { type: 'limit', hit: HIT_UNKNOWN, jitter: 0.9 },
+    NOW,
+    DEFAULT_CONFIG,
+  );
+  assert.equal(state.phase === 'waiting' && state.wakeAt, NOW + DEFAULT_CONFIG.pollIntervalMs);
+});
+
+test('confirmed while resuming → idle', () => {
+  const resuming: ResumeScheduleState = { phase: 'resuming', hit: HIT, attempt: 1 };
+  const state = nextResumeScheduleState(resuming, { type: 'confirmed' }, NOW, DEFAULT_CONFIG);
+  assert.equal(state.phase, 'idle');
+});
+
+test('confirmed while waiting is ignored', () => {
+  const waiting: ResumeScheduleState = {
+    phase: 'waiting',
+    hit: HIT,
+    wakeAt: NOW + 100_000,
+    attempt: 1,
+  };
+  const state = nextResumeScheduleState(waiting, { type: 'confirmed' }, NOW, DEFAULT_CONFIG);
+  assert.deepEqual(state, waiting);
 });

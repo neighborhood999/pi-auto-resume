@@ -1,9 +1,5 @@
 export type ProviderFamily = 'codex' | 'anthropic';
 
-/**
- * Where a known reset time came from. `unrecorded` marks pending entries
- * persisted before the source was recorded.
- */
 export type ResetSource = 'metadata' | 'header' | 'body' | 'usage-api' | 'unrecorded';
 
 export type ResetInfo = {
@@ -16,7 +12,6 @@ export type UsageResult =
   | { readonly ok: true; readonly reset: ResetInfo }
   | { readonly ok: false; readonly error: string };
 
-/** A classified usage-limit failure; a known reset always carries its source. */
 export type UsageLimitHit =
   | {
       readonly provider: ProviderFamily;

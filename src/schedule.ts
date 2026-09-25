@@ -20,7 +20,7 @@ export type ResumeScheduleEvent =
   | {
       readonly type: 'limit';
       readonly hit: UsageLimitHit;
-      /** Uniform sample in [0, 1) that spreads wakes across sessions sharing an account. */
+      /** Sample in [0, 1). */
       readonly jitter: number;
     }
   | {
@@ -30,7 +30,6 @@ export type ResumeScheduleEvent =
       readonly attempt: number;
     }
   | { readonly type: 'settled-ok' }
-  // The resumed run produced a successful assistant message: the limit lifted.
   | { readonly type: 'confirmed' }
   | { readonly type: 'wake' }
   | { readonly type: 'cancel' };
@@ -50,7 +49,6 @@ export function isAutoResumeEnabled(
 export type AutoResumeConfig = {
   readonly enabled: boolean;
   readonly bufferMs: number;
-  /** Upper bound of the random delay added after a known reset; 0 disables it. */
   readonly jitterMs: number;
   readonly pollIntervalMs: number;
   readonly maxAttempts: number;
@@ -146,8 +144,6 @@ function deriveWakeAt(
   config: AutoResumeConfig,
 ): number {
   if (hit.resetAt !== undefined) {
-    // Sessions on one account share a reset time; the jitter keeps them from
-    // all retrying in the same instant.
     return hit.resetAt + config.bufferMs + Math.floor(jitter * config.jitterMs);
   }
   return now + config.pollIntervalMs;

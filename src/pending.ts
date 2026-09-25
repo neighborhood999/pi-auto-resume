@@ -65,7 +65,6 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   ) {
     return { ok: false, error: 'Pending auto-resume state has invalid timing or attempt data.' };
   }
-  // Entries written before the reset source was recorded omit `source`.
   const hit: UsageLimitHit =
     resetAt === undefined
       ? { provider: family, resetAt: undefined }
@@ -120,21 +119,19 @@ function positiveFiniteOptional(value: unknown): number | undefined | 'invalid' 
   return positiveFinite(value) ?? 'invalid';
 }
 
+const RESET_SOURCES: readonly ResetSource[] = [
+  'metadata',
+  'header',
+  'body',
+  'usage-api',
+  'unrecorded',
+];
+
 function resetSourceOptional(value: unknown): ResetSource | undefined | 'invalid' {
   if (value === undefined) {
     return undefined;
   }
-  return isResetSource(value) ? value : 'invalid';
-}
-
-function isResetSource(value: unknown): value is ResetSource {
-  return (
-    value === 'metadata' ||
-    value === 'header' ||
-    value === 'body' ||
-    value === 'usage-api' ||
-    value === 'unrecorded'
-  );
+  return RESET_SOURCES.find((source) => source === value) ?? 'invalid';
 }
 
 function positiveInteger(value: unknown): number | undefined {

@@ -35,7 +35,7 @@ const USAGE_API_TIMEOUT_MS = 10_000;
 export type AutoResumeDependencies = {
   /** Ring once when the resumed run first succeeds. */
   readonly terminalBell?: () => void;
-  /** Uniform sample in [0, 1) used to jitter wake times. */
+  /** Sample in [0, 1) for wake jitter. */
   readonly random?: () => number;
   /** Report a low-noise, sanitized diagnostic for a failed usage lookup. */
   readonly diagnostic?: (message: string) => void;
@@ -44,7 +44,6 @@ export type AutoResumeDependencies = {
 type TargetModel = {
   readonly provider: string;
   readonly modelId: string;
-  /** Display-only model name; never used for identity checks. */
   readonly displayName: string;
 };
 
@@ -180,7 +179,6 @@ export default function autoResume(
         overlay: true,
         overlayOptions: {
           anchor: 'top-right',
-          // Intentional settled HUD choice: keep the fixed overlay at 46 cols.
           width: 46,
           offsetY: 1,
           nonCapturing: true,
@@ -373,9 +371,6 @@ export default function autoResume(
     });
   });
 
-  // A resumed run can last for hours. Its first successful assistant message
-  // proves the limit lifted, so disarm and announce then rather than at
-  // settlement. A later limit error in the same run re-arms from idle.
   pi.on('message_end', (event, ctx) => {
     if (schedule.phase !== 'resuming' || !isSuccessfulAssistant(event.message, targetModel)) {
       return;
@@ -424,9 +419,6 @@ export default function autoResume(
         ctx.ui.notify('Auto-resume: max attempts reached, giving up.', 'warning');
       }
     } else if (schedule.phase !== 'idle') {
-      // Normally `confirmed` already disarmed the resume. Reaching here while
-      // resuming means the run ended without a successful assistant message
-      // (for example, it was aborted), so there is no lift to announce.
       dispatch({ type: 'settled-ok' }, ctx);
     } else {
       clearTargetModel();
@@ -564,8 +556,6 @@ export default function autoResume(
       displayName: pending.model,
     };
 
-    // Mismatch resolution intentionally happens before confirmation. A stale
-    // pending record must not prompt the user or arm against another model.
     if (family !== pending.family || !targetMatches(ctx, pendingTarget)) {
       pi.appendEntry(RESOLVED_ENTRY_TYPE, {});
       ctx.ui.notify(
@@ -720,19 +710,11 @@ export default function autoResume(
   });
 }
 
-/**
- * Whether a finalized message is a non-error assistant reply from the target.
- *
- * @param message - Framework message projected at the event boundary.
- * @param target - The model whose usage limit is being resumed.
- */
 function isSuccessfulAssistant(message: unknown, target: TargetModel | undefined): boolean {
-  if (!target || typeof message !== 'object' || message === null) {
-    return false;
-  }
-  const record = message as Record<string, unknown>;
+  const record = message as Record<string, unknown> | null | undefined;
   return (
-    record['role'] === 'assistant' &&
+    target !== undefined &&
+    record?.['role'] === 'assistant' &&
     record['provider'] === target.provider &&
     record['model'] === target.modelId &&
     record['stopReason'] !== 'error' &&

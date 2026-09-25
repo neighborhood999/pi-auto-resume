@@ -28,14 +28,15 @@ const DEFAULT_RESUME_PROMPT =
 const RESUME_NOTICE = '✓ usage limit lifted — resuming task';
 const PENDING_ENTRY_TYPE = 'auto-resume/pending';
 const RESOLVED_ENTRY_TYPE = 'auto-resume/resolved';
-const NOTICE_MESSAGE_TYPE = 'auto-resume/notice';
 const STATUS_KEY = 'autoresume';
 const USAGE_API_TIMEOUT_MS = 10_000;
 
 /** Side effects that are injectable at the composition-root boundary. */
 export type AutoResumeDependencies = {
-  /** Ring once after a resumed turn settles successfully. */
+  /** Ring once when the resumed run first succeeds. */
   readonly terminalBell?: () => void;
+  /** Uniform sample in [0, 1) used to jitter wake times. */
+  readonly random?: () => number;
   /** Report a low-noise, sanitized diagnostic for a failed usage lookup. */
   readonly diagnostic?: (message: string) => void;
 };
@@ -75,6 +76,7 @@ export default function autoResume(
   const detector = createUsageLimitDetector();
   const terminalBell = dependencies.terminalBell ?? createTerminalBell();
   const diagnostic = dependencies.diagnostic ?? ((message: string) => console.warn(message));
+  const random = dependencies.random ?? Math.random;
   let schedule: ResumeScheduleState = { phase: 'idle' };
   let config: AutoResumeConfig = DEFAULT_CONFIG;
   let sessionOverride: SessionEnablement = 'Inherit';
@@ -371,6 +373,18 @@ export default function autoResume(
     });
   });
 
+  // A resumed run can last for hours. Its first successful assistant message
+  // proves the limit lifted, so disarm and announce then rather than at
+  // settlement. A later limit error in the same run re-arms from idle.
+  pi.on('message_end', (event, ctx) => {
+    if (schedule.phase !== 'resuming' || !isSuccessfulAssistant(event.message, targetModel)) {
+      return;
+    }
+    dispatch({ type: 'confirmed' }, ctx);
+    terminalBell();
+    ctx.ui.notify(RESUME_NOTICE, 'info');
+  });
+
   pi.on('agent_settled', async (_event, ctx) => {
     const hit = detector.classify(Date.now());
     if (!enabled()) {
@@ -405,17 +419,15 @@ export default function autoResume(
         }
         return;
       }
-      dispatch({ type: 'limit', hit: resolved }, ctx);
+      dispatch({ type: 'limit', hit: resolved, jitter: random() }, ctx);
       if (schedule.phase === 'idle') {
         ctx.ui.notify('Auto-resume: max attempts reached, giving up.', 'warning');
       }
     } else if (schedule.phase !== 'idle') {
-      const wasResuming = schedule.phase === 'resuming';
+      // Normally `confirmed` already disarmed the resume. Reaching here while
+      // resuming means the run ended without a successful assistant message
+      // (for example, it was aborted), so there is no lift to announce.
       dispatch({ type: 'settled-ok' }, ctx);
-      if (wasResuming) {
-        terminalBell();
-        sendResumeNotice(pi);
-      }
     } else {
       clearTargetModel();
     }
@@ -467,7 +479,7 @@ export default function autoResume(
         return undefined;
       }
       if (result.ok) {
-        return { provider: family, resetAt: result.reset.at };
+        return { provider: family, resetAt: result.reset.at, source: result.reset.source };
       }
       diagnostic(
         `pi-auto-resume: usage API fallback unavailable (${family}; ${sanitizeDiagnostic(result.error)}).`,
@@ -686,9 +698,10 @@ export default function autoResume(
         if (schedule.phase === 'idle') {
           ctx.ui.notify(`Auto-resume: ${isEnabled ? 'enabled' : 'disabled'}, idle.`, 'info');
         } else if (schedule.phase === 'waiting') {
-          const until = schedule.hit.resetAt
-            ? new Date(schedule.wakeAt).toLocaleTimeString()
-            : 'unknown';
+          const until =
+            schedule.hit.resetAt === undefined
+              ? 'unknown'
+              : `${new Date(schedule.wakeAt).toLocaleTimeString()}, reset via ${schedule.hit.source}`;
           ctx.ui.notify(
             `Auto-resume: waiting (attempt ${schedule.attempt}/${config.maxAttempts}, resumes ~${until}).`,
             'info',
@@ -707,20 +720,24 @@ export default function autoResume(
   });
 }
 
-function sendResumeNotice(pi: ExtensionAPI): void {
-  try {
-    pi.sendMessage(
-      {
-        customType: NOTICE_MESSAGE_TYPE,
-        content: RESUME_NOTICE,
-        display: true,
-      },
-      { triggerTurn: false },
-    );
-  } catch {
-    // The resumed settlement is already complete; a transcript rendering
-    // failure must not re-arm or otherwise change the schedule.
+/**
+ * Whether a finalized message is a non-error assistant reply from the target.
+ *
+ * @param message - Framework message projected at the event boundary.
+ * @param target - The model whose usage limit is being resumed.
+ */
+function isSuccessfulAssistant(message: unknown, target: TargetModel | undefined): boolean {
+  if (!target || typeof message !== 'object' || message === null) {
+    return false;
   }
+  const record = message as Record<string, unknown>;
+  return (
+    record['role'] === 'assistant' &&
+    record['provider'] === target.provider &&
+    record['model'] === target.modelId &&
+    record['stopReason'] !== 'error' &&
+    record['stopReason'] !== 'aborted'
+  );
 }
 
 function makeTargetModel(

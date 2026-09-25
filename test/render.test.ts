@@ -30,7 +30,7 @@ test('hhmm formats hours and minutes', () => {
 test('render waiting state with known reset', () => {
   const state: ResumeScheduleState = {
     phase: 'waiting',
-    hit: { provider: 'codex', resetAt: NOW + 3600_000 },
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'header' },
     wakeAt: NOW + 3645_000,
     attempt: 1,
   };
@@ -61,7 +61,7 @@ test('render waiting state with unknown reset', () => {
 test('render resuming state', () => {
   const state: ResumeScheduleState = {
     phase: 'resuming',
-    hit: { provider: 'codex', resetAt: NOW + 3600_000 },
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'header' },
     attempt: 1,
   };
   const lines = renderResumeCountdown(state, IDENTITY_THEME, NOW, 0, 'claude · opus-4-7');
@@ -72,7 +72,7 @@ test('render resuming state', () => {
 test('formatFooterStatus for waiting with known reset', () => {
   const state: ResumeScheduleState = {
     phase: 'waiting',
-    hit: { provider: 'codex', resetAt: NOW + 3600_000 },
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'header' },
     wakeAt: NOW + 3645_000,
     attempt: 1,
   };
@@ -101,7 +101,7 @@ test('formatFooterStatus for idle returns undefined', () => {
 test('formatFooterStatus for resuming', () => {
   const state: ResumeScheduleState = {
     phase: 'resuming',
-    hit: { provider: 'codex', resetAt: NOW },
+    hit: { provider: 'codex', resetAt: NOW, source: 'header' },
     attempt: 2,
   };
   const status = formatFooterStatus(state);
@@ -112,7 +112,7 @@ test('formatFooterStatus for resuming', () => {
 test('render waiting state with ≥24h shows absolute date', () => {
   const state: ResumeScheduleState = {
     phase: 'waiting',
-    hit: { provider: 'codex', resetAt: NOW + 100_000_000 },
+    hit: { provider: 'codex', resetAt: NOW + 100_000_000, source: 'header' },
     wakeAt: NOW + 100_000_000,
     attempt: 1,
   };
@@ -130,7 +130,7 @@ test('fixed overlay truncates long model labels by visible width', () => {
   const longLabel = 'openai-codex · gpt-5.6-luna-with-a-very-long-name (medium) and extra details';
   const state: ResumeScheduleState = {
     phase: 'waiting',
-    hit: { provider: 'codex', resetAt: NOW + 3600_000 },
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'header' },
     wakeAt: NOW + 3645_000,
     attempt: 1,
   };
@@ -148,7 +148,7 @@ test('fixed overlay truncates long model labels by visible width', () => {
 test('relative countdown uses minutes then seconds in the final minute', () => {
   const state: ResumeScheduleState = {
     phase: 'waiting',
-    hit: { provider: 'codex', resetAt: NOW + 60_000 },
+    hit: { provider: 'codex', resetAt: NOW + 60_000, source: 'header' },
     wakeAt: NOW + 42_000,
     attempt: 1,
   };

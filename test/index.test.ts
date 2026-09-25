@@ -35,6 +35,7 @@ type ContextState = {
   getApiKey: () => Promise<string | undefined>;
   confirm: () => Promise<boolean>;
   confirmCalls: number;
+  bells: number;
 };
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown;
@@ -129,7 +130,11 @@ function makeContext(state: ContextState): ExtensionContext {
 
 function makeHarness(
   model: TestModel,
-  options?: { readonly entries?: TestEntry[]; readonly hasUI?: boolean },
+  options?: {
+    readonly entries?: TestEntry[];
+    readonly hasUI?: boolean;
+    readonly random?: () => number;
+  },
 ): {
   readonly api: FakeExtensionAPI;
   readonly ctx: ExtensionContext;
@@ -147,12 +152,16 @@ function makeHarness(
     getApiKey: async () => undefined,
     confirm: async () => true,
     confirmCalls: 0,
+    bells: 0,
   };
   const api = new FakeExtensionAPI();
   api.contextState = state;
   autoResume(api.asExtensionAPI(), {
-    terminalBell: () => undefined,
+    terminalBell: () => {
+      state.bells += 1;
+    },
     diagnostic: () => undefined,
+    random: options?.random ?? (() => 0),
   });
   return { api, ctx: makeContext(state), state };
 }
@@ -165,6 +174,21 @@ function assistantError(model: TestModel, errorMessage: string): Record<string, 
     stopReason: 'error',
     errorMessage,
   };
+}
+
+function assistantMessage(model: TestModel, stopReason: string): Record<string, unknown> {
+  return { role: 'assistant', provider: model.provider, model: model.id, stopReason };
+}
+
+async function resumeNow(harness: ReturnType<typeof makeHarness>): Promise<void> {
+  assert.ok(harness.api.command);
+  await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+}
+
+function resolvedCount(harness: ReturnType<typeof makeHarness>): number {
+  return harness.api.appendedEntries.filter((entry) => entry.customType === 'auto-resume/resolved')
+    .length;
 }
 
 async function armKnownLimit(
@@ -279,43 +303,127 @@ test('model target is captured before usage API resolution and stale resolution 
   assert.equal(harness.state.sentMessages.length, 0);
 });
 
-test('successful settlement clears the active target and wait lifecycle', async () => {
-  const oldModel = { provider: 'anthropic', id: 'claude-old', name: 'Claude Old' };
-  const harness = makeHarness(oldModel);
+test('first successful assistant message confirms the resume before settlement', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model);
   await armKnownLimit(harness);
-  assert.ok(harness.api.command);
-  await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
+  await resumeNow(harness);
+  assert.equal(harness.state.statuses.get('autoresume'), '⏸ limit · checking…');
 
-  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: assistantMessage(model, 'toolUse') },
+    harness.ctx,
+  );
+
+  // The run is still going, but the HUD, pending entry, and signal are done.
+  assert.equal(harness.state.statuses.get('autoresume'), undefined);
+  assert.equal(resolvedCount(harness), 1);
+  assert.equal(harness.state.bells, 1);
+  assert.ok(harness.state.notifications.includes('✓ usage limit lifted — resuming task'));
+  assert.deepEqual(harness.state.customMessages, []);
+
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: assistantMessage(model, 'stop') },
+    harness.ctx,
+  );
   await harness.api.emit(
     'agent_end',
-    {
-      type: 'agent_end',
-      messages: [
-        {
-          role: 'assistant',
-          provider: oldModel.provider,
-          model: oldModel.id,
-          stopReason: 'stop',
-        },
-      ],
-    },
+    { type: 'agent_end', messages: [assistantMessage(model, 'stop')] },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+
+  assert.equal(harness.state.bells, 1);
+  assert.equal(resolvedCount(harness), 1);
+  assert.equal(harness.state.sentMessages.length, 1);
+});
+
+test('non-success messages during a resume do not confirm it', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model);
+  await armKnownLimit(harness);
+  await resumeNow(harness);
+
+  const other = { provider: 'anthropic', id: 'claude-other', name: 'Claude Other' };
+  for (const message of [
+    { role: 'user', content: 'resume' },
+    assistantMessage(model, 'error'),
+    assistantMessage(model, 'aborted'),
+    assistantMessage(other, 'stop'),
+  ]) {
+    await harness.api.emit('message_end', { type: 'message_end', message }, harness.ctx);
+  }
+
+  assert.equal(harness.state.statuses.get('autoresume'), '⏸ limit · checking…');
+  assert.equal(resolvedCount(harness), 0);
+  assert.equal(harness.state.bells, 0);
+});
+
+test('a resumed run that settles without success disarms without announcing', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model);
+  await armKnownLimit(harness);
+  await resumeNow(harness);
+
+  await harness.api.emit(
+    'agent_end',
+    { type: 'agent_end', messages: [assistantMessage(model, 'aborted')] },
     harness.ctx,
   );
   await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
 
   assert.equal(harness.state.statuses.get('autoresume'), undefined);
-  assert.equal(harness.state.sentMessages.length, 1);
-  assert.deepEqual(harness.state.customMessages, [
-    {
-      customType: 'auto-resume/notice',
-      content: '✓ usage limit lifted — resuming task',
-      triggerTurn: false,
-    },
-  ]);
-  assert.ok(
-    harness.api.appendedEntries.some((entry) => entry.customType === 'auto-resume/resolved'),
+  assert.equal(resolvedCount(harness), 1);
+  assert.equal(harness.state.bells, 0);
+  assert.equal(harness.state.notifications.includes('✓ usage limit lifted — resuming task'), false);
+});
+
+test('a limit later in a confirmed run re-arms as a fresh first attempt', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model);
+  await armKnownLimit(harness);
+  await resumeNow(harness);
+  await harness.api.emit(
+    'message_end',
+    { type: 'message_end', message: assistantMessage(model, 'toolUse') },
+    harness.ctx,
   );
+
+  await harness.api.emit(
+    'after_provider_response',
+    { type: 'after_provider_response', status: 429, headers: { 'retry-after': '60' } },
+    harness.ctx,
+  );
+  await harness.api.emit(
+    'agent_end',
+    { type: 'agent_end', messages: [assistantError(model, 'rate limit exceeded')] },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+
+  const pending = harness.api.appendedEntries.filter(
+    (entry) => entry.customType === 'auto-resume/pending',
+  );
+  assert.equal(pending.length, 2);
+  assert.equal(pending.at(-1)?.data?.['attempt'], 1);
+});
+
+test('known resets are jittered and persist their source', async () => {
+  const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
+  const harness = makeHarness(model, { random: () => 0.5 });
+  await armKnownLimit(harness);
+
+  const pending = harness.api.appendedEntries.find(
+    (entry) => entry.customType === 'auto-resume/pending',
+  );
+  assert.ok(pending?.data);
+  const { resetAt, wakeAt, source } = pending.data;
+  assert.equal(typeof resetAt, 'number');
+  assert.equal(typeof wakeAt, 'number');
+  assert.equal(Number(wakeAt) - Number(resetAt), 45_000 + 7_500);
+  assert.equal(source, 'header');
 });
 
 test('wake with an exact model mismatch sends nothing', async () => {

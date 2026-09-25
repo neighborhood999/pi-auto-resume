@@ -14,6 +14,7 @@ const VALID = {
   model: 'Claude Opus',
   family: 'anthropic',
   resetAt: 1_700_000_000_000,
+  source: 'usage-api',
   wakeAt: 1_700_000_045_000,
   attempt: 4,
 };
@@ -38,12 +39,36 @@ test('pending parser accepts legacy unversioned entries', () => {
   }
 });
 
+test('pending parser marks a known reset without a recorded source as unrecorded', () => {
+  const { source: _source, ...unsourced } = VALID;
+  const parsed = parsePendingResumeState(unsourced);
+  assert.ok(parsed.ok);
+  if (parsed.ok) {
+    assert.deepEqual(parsed.state.hit, {
+      provider: 'anthropic',
+      resetAt: VALID.resetAt,
+      source: 'unrecorded',
+    });
+  }
+});
+
+test('pending parser keeps an unknown reset without a source', () => {
+  const { source: _source, resetAt: _resetAt, ...unknownReset } = VALID;
+  const parsed = parsePendingResumeState(unknownReset);
+  assert.ok(parsed.ok);
+  if (parsed.ok) {
+    assert.deepEqual(parsed.state.hit, { provider: 'anthropic', resetAt: undefined });
+    assert.equal(pendingResumeEntryData(parsed.state)['source'], undefined);
+  }
+});
+
 test('pending parser rejects mismatched schema and invalid numbers', () => {
   assert.equal(parsePendingResumeState({ ...VALID, schemaVersion: 2 }).ok, false);
   assert.equal(parsePendingResumeState({ ...VALID, wakeAt: Infinity }).ok, false);
   assert.equal(parsePendingResumeState({ ...VALID, resetAt: 0 }).ok, false);
   assert.equal(parsePendingResumeState({ ...VALID, attempt: 1.5 }).ok, false);
   assert.equal(parsePendingResumeState({ ...VALID, attempt: 0 }).ok, false);
+  assert.equal(parsePendingResumeState({ ...VALID, source: 'guess' }).ok, false);
 });
 
 test('pending parser preserves the provider family for target mapping checks', () => {

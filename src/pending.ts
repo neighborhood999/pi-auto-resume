@@ -1,4 +1,4 @@
-import type { ProviderFamily, UsageLimitHit } from './providers/types.ts';
+import type { ProviderFamily, ResetSource, UsageLimitHit } from './providers/types.ts';
 
 /** Version of the session custom-entry schema written by this extension. */
 export const PENDING_SCHEMA_VERSION = 1 as const;
@@ -50,15 +50,26 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   const model = positiveString(input['model']);
   const family = input['family'];
   const resetAt = positiveFiniteOptional(input['resetAt']);
+  const source = resetSourceOptional(input['source']);
   const wakeAt = positiveFinite(input['wakeAt']);
   const attempt = positiveInteger(input['attempt']);
 
   if (!provider || !modelId || !model || !isProviderFamily(family)) {
     return { ok: false, error: 'Pending auto-resume state has an invalid model target.' };
   }
-  if (resetAt === 'invalid' || wakeAt === undefined || attempt === undefined) {
+  if (
+    resetAt === 'invalid' ||
+    source === 'invalid' ||
+    wakeAt === undefined ||
+    attempt === undefined
+  ) {
     return { ok: false, error: 'Pending auto-resume state has invalid timing or attempt data.' };
   }
+  // Entries written before the reset source was recorded omit `source`.
+  const hit: UsageLimitHit =
+    resetAt === undefined
+      ? { provider: family, resetAt: undefined }
+      : { provider: family, resetAt, source: source ?? 'unrecorded' };
 
   return {
     ok: true,
@@ -68,7 +79,7 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
       modelId,
       model,
       family,
-      hit: { provider: family, resetAt: resetAt ?? undefined },
+      hit,
       wakeAt,
       attempt,
     },
@@ -84,6 +95,7 @@ export function pendingResumeEntryData(state: PendingResumeState): Record<string
     model: state.model,
     family: state.family,
     resetAt: state.hit.resetAt,
+    source: state.hit.resetAt === undefined ? undefined : state.hit.source,
     wakeAt: state.wakeAt,
     attempt: state.attempt,
   };
@@ -106,6 +118,23 @@ function positiveFiniteOptional(value: unknown): number | undefined | 'invalid' 
     return undefined;
   }
   return positiveFinite(value) ?? 'invalid';
+}
+
+function resetSourceOptional(value: unknown): ResetSource | undefined | 'invalid' {
+  if (value === undefined) {
+    return undefined;
+  }
+  return isResetSource(value) ? value : 'invalid';
+}
+
+function isResetSource(value: unknown): value is ResetSource {
+  return (
+    value === 'metadata' ||
+    value === 'header' ||
+    value === 'body' ||
+    value === 'usage-api' ||
+    value === 'unrecorded'
+  );
 }
 
 function positiveInteger(value: unknown): number | undefined {

@@ -80,3 +80,20 @@ test('pending parser preserves the provider family for target mapping checks', (
     assert.equal(parsed.state.hit.provider, 'codex');
   }
 });
+
+test('pending schema round-trips the usage-limit window', () => {
+  const parsed = parsePendingResumeState({ ...VALID, window: 'weekly' });
+  assert.ok(parsed.ok);
+  if (parsed.ok) {
+    assert.equal(parsed.state.hit.resetAt !== undefined && parsed.state.hit.window, 'weekly');
+    assert.equal(pendingResumeEntryData(parsed.state)['window'], 'weekly');
+  }
+});
+
+test('pending parser ignores an unknown usage-limit window', () => {
+  const parsed = parsePendingResumeState({ ...VALID, window: 'monthly' });
+  assert.ok(parsed.ok);
+  if (parsed.ok) {
+    assert.equal(pendingResumeEntryData(parsed.state)['window'], undefined);
+  }
+});

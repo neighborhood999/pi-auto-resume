@@ -351,3 +351,29 @@ test('uses provider from ctx.model, not hardcoded unknown', () => {
   assert.equal(hit.provider, 'anthropic');
   assert.equal(hit.resetAt, NOW + 120 * 1000);
 });
+
+test('labels a reset more than five hours away as the weekly limit', () => {
+  const d = createUsageLimitDetector();
+  d.onRunEnd({
+    _tag: 'Error',
+    provider: 'openai-codex',
+    errorMessage: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~761 min.',
+    resetsAt: undefined,
+  });
+  const hit = d.classify(NOW);
+  assert.ok(hit?.resetAt);
+  assert.equal(hit.window, 'weekly');
+});
+
+test('leaves a reset within five hours unlabeled because either limit fits', () => {
+  const d = createUsageLimitDetector();
+  d.onRunEnd({
+    _tag: 'Error',
+    provider: 'openai-codex',
+    errorMessage: 'You have hit your ChatGPT usage limit. Try again in ~42 min.',
+    resetsAt: undefined,
+  });
+  const hit = d.classify(NOW);
+  assert.ok(hit?.resetAt);
+  assert.equal(hit.window, undefined);
+});

@@ -1,6 +1,6 @@
 import { isAnthropicUsageLimit, parseAnthropicHeaders } from './anthropic.ts';
 import { isCodexUsageLimit, parseCodexErrorBody, parseCodexHeaders } from './codex.ts';
-import type { ProviderFamily, UsageLimitHit } from './types.ts';
+import type { ProviderFamily, UsageLimitHit, UsageLimitWindow } from './types.ts';
 
 export type { UsageLimitHit } from './types.ts';
 
@@ -43,6 +43,7 @@ const NON_RESUMABLE_PATTERNS = [
 ];
 
 const EVIDENCE_FRESHNESS_MS = 600_000;
+const FIVE_HOURS_MS = 5 * 3_600_000;
 
 export function providerFamily(provider: string): ProviderFamily | null {
   if (provider === 'openai-codex') {
@@ -134,7 +135,12 @@ export function createUsageLimitDetector(): UsageLimitDetector {
       }
 
       if (currentRunError.resetsAt !== undefined) {
-        return { provider: family, resetAt: currentRunError.resetsAt, source: 'metadata' };
+        return {
+          provider: family,
+          resetAt: currentRunError.resetsAt,
+          source: 'metadata',
+          window: windowFromResetDistance(currentRunError.resetsAt, now),
+        };
       }
 
       const headerReset =
@@ -144,19 +150,33 @@ export function createUsageLimitDetector(): UsageLimitDetector {
           : parseAnthropicHeaders(fresh.headers, fresh.at));
 
       if (headerReset) {
-        return { provider: family, resetAt: headerReset, source: 'header' };
+        return {
+          provider: family,
+          resetAt: headerReset,
+          source: 'header',
+          window: windowFromResetDistance(headerReset, now),
+        };
       }
 
       if (family === 'codex') {
         const bodyReset = parseCodexErrorBody(currentRunError.errorMessage, now);
         if (bodyReset) {
-          return { provider: family, resetAt: bodyReset, source: 'body' };
+          return {
+            provider: family,
+            resetAt: bodyReset,
+            source: 'body',
+            window: windowFromResetDistance(bodyReset, now),
+          };
         }
       }
 
       return { provider: family, resetAt: undefined };
     },
   };
+}
+
+function windowFromResetDistance(resetAt: number, now: number): UsageLimitWindow | undefined {
+  return resetAt - now > FIVE_HOURS_MS ? 'weekly' : undefined;
 }
 
 function isNonResumable(errorMessage: string): boolean {

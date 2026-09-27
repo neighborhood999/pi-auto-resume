@@ -1,5 +1,5 @@
 import { decodeJwtPayload, defaultFetch, errText, num, pick, type FetchDeps } from './client.ts';
-import type { ResetInfo, UsageResult } from './types.ts';
+import type { ResetInfo, UsageLimitWindow, UsageResult } from './types.ts';
 
 const CODEX_PATTERNS = [
   /hit your ChatGPT usage limit/i,
@@ -97,25 +97,48 @@ export function codexAccountId(token: string): string | undefined {
   return undefined;
 }
 
+const CODEX_WINDOWS = {
+  primary_window: 'five_hour',
+  secondary_window: 'weekly',
+} as const satisfies Record<string, UsageLimitWindow>;
+
 export function codexResetFromBody(body: unknown, now: number): ResetInfo | null {
-  const primary = pick(pick(body, 'rate_limit'), 'primary_window');
-  const resetAt = num(pick(primary, 'reset_at'));
-  if (resetAt !== null && resetAt > 0) {
-    const milliseconds = resetAt > 1e12 ? resetAt : resetAt * 1000;
-    if (Number.isFinite(milliseconds) && milliseconds > 0) {
-      return {
-        at: milliseconds,
-        source: 'usage-api',
-        window: 'primary_window',
-      };
+  const rateLimit = pick(body, 'rate_limit');
+  let blocking: ResetInfo | null = null;
+
+  for (const [key, window] of Object.entries(CODEX_WINDOWS)) {
+    const data = pick(rateLimit, key);
+    const usedPercent = num(pick(data, 'used_percent'));
+    if (usedPercent === null || usedPercent < 100) {
+      continue;
+    }
+
+    const reset = codexWindowReset(data, window, now);
+    if (reset && (!blocking || reset.at > blocking.at)) {
+      blocking = reset;
     }
   }
 
-  const resetAfter = num(pick(primary, 'reset_after_seconds'));
+  return (
+    blocking ??
+    codexWindowReset(pick(rateLimit, 'primary_window'), CODEX_WINDOWS.primary_window, now)
+  );
+}
+
+function codexWindowReset(data: unknown, window: UsageLimitWindow, now: number): ResetInfo | null {
+  const resetAt = num(pick(data, 'reset_at'));
+  if (resetAt !== null && resetAt > 0) {
+    const milliseconds = resetAt > 1e12 ? resetAt : resetAt * 1000;
+    if (Number.isFinite(milliseconds) && milliseconds > 0) {
+      return { at: milliseconds, source: 'usage-api', window };
+    }
+  }
+
+  const resetAfter = num(pick(data, 'reset_after_seconds'));
   if (resetAfter !== null && resetAfter > 0) {
     const at = now + resetAfter * 1000;
     if (Number.isFinite(at) && at > 0) {
-      return { at, source: 'usage-api', window: 'primary_window' };
+      return { at, source: 'usage-api', window };
     }
   }
 

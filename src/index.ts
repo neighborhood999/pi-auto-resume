@@ -11,7 +11,7 @@ import { fetchAnthropicReset } from './providers/anthropic.ts';
 import { fetchCodexReset } from './providers/codex.ts';
 import type { UsageLimitHit } from './providers/types.ts';
 import { parsePendingResumeState, pendingResumeEntryData } from './pending.ts';
-import { formatFooterStatus } from './render.ts';
+import { formatFooterStatus, usageLimitLabel } from './render.ts';
 import {
   DEFAULT_CONFIG,
   isAutoResumeEnabled,
@@ -514,7 +514,12 @@ export default function autoResume(
         return undefined;
       }
       if (result.ok) {
-        return { provider: family, resetAt: result.reset.at, source: result.reset.source };
+        return {
+          provider: family,
+          resetAt: result.reset.at,
+          source: result.reset.source,
+          window: result.reset.window,
+        };
       }
       diagnostic(
         `pi-auto-resume: usage API fallback unavailable (${family}; ${sanitizeDiagnostic(result.error)}).`,
@@ -736,7 +741,7 @@ export default function autoResume(
           const until =
             schedule.hit.resetAt === undefined
               ? 'unknown'
-              : `${new Date(schedule.wakeAt).toLocaleTimeString()}, reset via ${schedule.hit.source}`;
+              : `${new Date(schedule.wakeAt).toLocaleTimeString()}, ${usageLimitLabel(schedule.hit) ?? 'limit'} reset via ${schedule.hit.source}`;
           ctx.ui.notify(
             `Auto-resume: waiting (attempt ${schedule.attempt}/${config.maxAttempts}, resumes ~${until}).`,
             'info',

@@ -99,7 +99,7 @@ test('anthropicResetFromBody picks exhausted window over non-exhausted', () => {
   assert.equal(result.window, 'weekly');
 });
 
-test('anthropicResetFromBody picks earliest reset among exhausted windows', () => {
+test('anthropicResetFromBody picks the latest reset when both windows are exhausted', () => {
   const fiveHourDate = new Date(NOW + 3600_000).toISOString();
   const weeklyDate = new Date(NOW + 86_400_000).toISOString();
   const body = {
@@ -108,8 +108,8 @@ test('anthropicResetFromBody picks earliest reset among exhausted windows', () =
   };
   const result = anthropicResetFromBody(body);
   assert.ok(result);
-  assert.ok(Math.abs(result.at - (NOW + 3600_000)) < 1000);
-  assert.equal(result.window, 'five_hour');
+  assert.ok(Math.abs(result.at - (NOW + 86_400_000)) < 1000);
+  assert.equal(result.window, 'weekly');
 });
 
 test('anthropicResetFromBody falls back to five_hour when no window exhausted', () => {

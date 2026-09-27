@@ -1,5 +1,5 @@
 import { defaultFetch, errText, parseEpochOrIso, pick, type FetchDeps } from './client.ts';
-import type { ResetInfo, UsageResult } from './types.ts';
+import type { ResetInfo, UsageLimitWindow, UsageResult } from './types.ts';
 
 export function isAnthropicUsageLimit(errorMessage: string, status: number | undefined): boolean {
   if (status === 429) {
@@ -37,36 +37,25 @@ export function parseAnthropicHeaders(
 const ANTHROPIC_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const DEFAULT_USER_AGENT = 'claude-code/1.0.0';
 
+const ANTHROPIC_WINDOWS: readonly UsageLimitWindow[] = ['five_hour', 'weekly'];
+
 export function anthropicResetFromBody(body: unknown): ResetInfo | null {
-  const fiveHour = windowReset(body, 'five_hour');
-  const weekly = windowReset(body, 'weekly');
-
-  if (fiveHour && weekly) {
-    const fiveHourExhausted = isWindowExhausted(body, 'five_hour');
-    const weeklyExhausted = isWindowExhausted(body, 'weekly');
-
-    if (fiveHourExhausted !== null || weeklyExhausted !== null) {
-      const exhausted: ResetInfo[] = [];
-      if (fiveHourExhausted === true) {
-        exhausted.push(fiveHour);
-      }
-      if (weeklyExhausted === true) {
-        exhausted.push(weekly);
-      }
-
-      if (exhausted.length > 0) {
-        return exhausted.reduce((a, b) => (a.at <= b.at ? a : b));
-      }
+  let blocking: ResetInfo | null = null;
+  for (const window of ANTHROPIC_WINDOWS) {
+    if (!isWindowExhausted(body, window)) {
+      continue;
     }
-
-    return fiveHour;
+    const reset = windowReset(body, window);
+    if (reset && (!blocking || reset.at > blocking.at)) {
+      blocking = reset;
+    }
   }
-  return fiveHour ?? weekly ?? null;
+
+  return blocking ?? windowReset(body, 'five_hour') ?? windowReset(body, 'weekly');
 }
 
-function windowReset(body: unknown, key: string): ResetInfo | null {
-  const window = pick(body, key);
-  const resetsAt = pick(window, 'resets_at');
+function windowReset(body: unknown, window: UsageLimitWindow): ResetInfo | null {
+  const resetsAt = pick(pick(body, window), 'resets_at');
   if (typeof resetsAt !== 'string') {
     return null;
   }
@@ -74,16 +63,12 @@ function windowReset(body: unknown, key: string): ResetInfo | null {
   if (!Number.isFinite(ms) || ms <= 0) {
     return null;
   }
-  return { at: ms, source: 'usage-api', window: key };
+  return { at: ms, source: 'usage-api', window };
 }
 
-function isWindowExhausted(body: unknown, key: string): boolean | null {
-  const window = pick(body, key);
-  const utilization = pick(window, 'utilization');
-  if (typeof utilization === 'number') {
-    return utilization >= 100;
-  }
-  return null;
+function isWindowExhausted(body: unknown, window: UsageLimitWindow): boolean {
+  const utilization = pick(pick(body, window), 'utilization');
+  return typeof utilization === 'number' && utilization >= 100;
 }
 
 export async function fetchAnthropicReset(

@@ -114,7 +114,10 @@ export function codexResetFromBody(body: unknown, now: number): ResetInfo | null
     }
 
     const reset = codexWindowReset(data, window, now);
-    if (reset && (!blocking || reset.at > blocking.at)) {
+    if (!reset) {
+      return null;
+    }
+    if (!blocking || reset.at > blocking.at) {
       blocking = reset;
     }
   }

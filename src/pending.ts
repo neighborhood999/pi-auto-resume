@@ -56,7 +56,7 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   const family = input['family'];
   const resetAt = positiveFiniteOptional(input['resetAt']);
   const source = resetSourceOptional(input['source']);
-  const window = usageLimitWindow(input['window']);
+  const window = usageLimitWindowOptional(input['window']);
   const wakeAt = positiveFinite(input['wakeAt']);
   const attempt = positiveInteger(input['attempt']);
 
@@ -66,6 +66,7 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   if (
     resetAt === 'invalid' ||
     source === 'invalid' ||
+    window === 'invalid' ||
     wakeAt === undefined ||
     attempt === undefined
   ) {
@@ -148,8 +149,11 @@ function resetSourceOptional(value: unknown): ResetSource | undefined | 'invalid
   return RESET_SOURCES.find((source) => source === value) ?? 'invalid';
 }
 
-function usageLimitWindow(value: unknown): UsageLimitWindow | undefined {
-  return value === 'five_hour' || value === 'weekly' ? value : undefined;
+function usageLimitWindowOptional(value: unknown): UsageLimitWindow | undefined | 'invalid' {
+  if (value === undefined) {
+    return undefined;
+  }
+  return value === 'five_hour' || value === 'weekly' ? value : 'invalid';
 }
 
 function positiveInteger(value: unknown): number | undefined {

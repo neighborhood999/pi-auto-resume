@@ -108,6 +108,16 @@ test('codexResetFromBody picks the latest reset when both windows are exhausted'
   assert.equal(result.at, 1700040000 * 1000);
 });
 
+test('codexResetFromBody refuses the five-hour reset when the exhausted weekly has none', () => {
+  const body = {
+    rate_limit: {
+      primary_window: { used_percent: 40, reset_at: 1700003600 },
+      secondary_window: { used_percent: 100 },
+    },
+  };
+  assert.equal(codexResetFromBody(body, NOW), null);
+});
+
 test('codexResetFromBody keeps the five-hour window when only it is exhausted', () => {
   const body = {
     rate_limit: {

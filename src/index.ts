@@ -508,7 +508,12 @@ export default function autoResume(
       const result =
         family === 'codex'
           ? await fetchCodexReset({ token, signal, now: Date.now() })
-          : await fetchAnthropicReset({ token, signal, now: Date.now() });
+          : await fetchAnthropicReset({
+              token,
+              modelId: guard.target.modelId,
+              signal,
+              now: Date.now(),
+            });
 
       if (!classificationIsCurrent(guard, ctx)) {
         return undefined;
@@ -747,8 +752,9 @@ export default function autoResume(
             'info',
           );
         } else {
+          const limit = usageLimitLabel(schedule.hit);
           ctx.ui.notify(
-            `Auto-resume: resuming (attempt ${schedule.attempt}/${config.maxAttempts}).`,
+            `Auto-resume: resuming (attempt ${schedule.attempt}/${config.maxAttempts}${limit ? `, ${limit}` : ''}).`,
             'info',
           );
         }

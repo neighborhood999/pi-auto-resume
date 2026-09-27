@@ -89,7 +89,7 @@ export function formatFooterStatus(state: ResumeScheduleState): string | undefin
     return `⏸ limit · reset time unknown · next check in ${relativeCountdown(state.wakeAt - Date.now(), true)}`;
   }
   if (state.phase === 'resuming') {
-    return '⏸ limit · checking…';
+    return `⏸ ${usageLimitLabel(state.hit) ?? 'limit'} · checking…`;
   }
   return undefined;
 }

@@ -90,8 +90,12 @@ test('pending schema round-trips the usage-limit window', () => {
   }
 });
 
-test('pending parser ignores an unknown usage-limit window', () => {
-  const parsed = parsePendingResumeState({ ...VALID, window: 'monthly' });
+test('pending parser rejects an unknown usage-limit window', () => {
+  assert.equal(parsePendingResumeState({ ...VALID, window: 'monthly' }).ok, false);
+});
+
+test('pending parser accepts a legacy entry without a usage-limit window', () => {
+  const parsed = parsePendingResumeState(VALID);
   assert.ok(parsed.ok);
   if (parsed.ok) {
     assert.equal(pendingResumeEntryData(parsed.state)['window'], undefined);

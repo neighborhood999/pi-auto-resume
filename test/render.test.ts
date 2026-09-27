@@ -229,3 +229,21 @@ test('formatFooterStatus names the weekly limit', () => {
   };
   assert.ok(formatFooterStatus(state)?.startsWith('⏸ weekly limit · resumes'));
 });
+
+test('formatFooterStatus keeps the limit label while resuming', () => {
+  const state: ResumeScheduleState = {
+    phase: 'resuming',
+    hit: { provider: 'codex', resetAt: NOW, source: 'usage-api', window: 'weekly' },
+    attempt: 1,
+  };
+  assert.equal(formatFooterStatus(state), '⏸ weekly limit · checking…');
+});
+
+test('formatFooterStatus falls back to a generic label while resuming an unknown window', () => {
+  const state: ResumeScheduleState = {
+    phase: 'resuming',
+    hit: { provider: 'codex', resetAt: undefined },
+    attempt: 1,
+  };
+  assert.equal(formatFooterStatus(state), '⏸ limit · checking…');
+});

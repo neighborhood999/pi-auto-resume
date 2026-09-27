@@ -1,5 +1,5 @@
 import { defaultFetch, errText, parseEpochOrIso, pick, type FetchDeps } from './client.ts';
-import type { ResetInfo, UsageResult } from './types.ts';
+import type { ResetInfo, UsageLimitWindow, UsageResult } from './types.ts';
 
 export function isAnthropicUsageLimit(errorMessage: string, status: number | undefined): boolean {
   if (status === 429) {
@@ -37,36 +37,45 @@ export function parseAnthropicHeaders(
 const ANTHROPIC_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const DEFAULT_USER_AGENT = 'claude-code/1.0.0';
 
-export function anthropicResetFromBody(body: unknown): ResetInfo | null {
-  const fiveHour = windowReset(body, 'five_hour');
-  const weekly = windowReset(body, 'weekly');
+type AnthropicBucket = {
+  readonly key: string;
+  readonly window: UsageLimitWindow;
+  readonly appliesTo?: (modelId: string) => boolean;
+};
 
-  if (fiveHour && weekly) {
-    const fiveHourExhausted = isWindowExhausted(body, 'five_hour');
-    const weeklyExhausted = isWindowExhausted(body, 'weekly');
+const FIVE_HOUR_BUCKET: AnthropicBucket = { key: 'five_hour', window: 'five_hour' };
+const SEVEN_DAY_BUCKET: AnthropicBucket = { key: 'seven_day', window: 'weekly' };
 
-    if (fiveHourExhausted !== null || weeklyExhausted !== null) {
-      const exhausted: ResetInfo[] = [];
-      if (fiveHourExhausted === true) {
-        exhausted.push(fiveHour);
-      }
-      if (weeklyExhausted === true) {
-        exhausted.push(weekly);
-      }
+const ANTHROPIC_BUCKETS: readonly AnthropicBucket[] = [
+  FIVE_HOUR_BUCKET,
+  SEVEN_DAY_BUCKET,
+  { key: 'seven_day_opus', window: 'weekly', appliesTo: (modelId) => /opus/i.test(modelId) },
+  { key: 'seven_day_sonnet', window: 'weekly', appliesTo: (modelId) => /sonnet/i.test(modelId) },
+];
 
-      if (exhausted.length > 0) {
-        return exhausted.reduce((a, b) => (a.at <= b.at ? a : b));
-      }
+export function anthropicResetFromBody(body: unknown, modelId: string): ResetInfo | null {
+  let blocking: ResetInfo | null = null;
+  for (const bucket of ANTHROPIC_BUCKETS) {
+    if (bucket.appliesTo && !bucket.appliesTo(modelId)) {
+      continue;
     }
-
-    return fiveHour;
+    if (!isBucketExhausted(body, bucket)) {
+      continue;
+    }
+    const reset = bucketReset(body, bucket);
+    if (!reset) {
+      return null;
+    }
+    if (!blocking || reset.at > blocking.at) {
+      blocking = reset;
+    }
   }
-  return fiveHour ?? weekly ?? null;
+
+  return blocking ?? bucketReset(body, FIVE_HOUR_BUCKET) ?? bucketReset(body, SEVEN_DAY_BUCKET);
 }
 
-function windowReset(body: unknown, key: string): ResetInfo | null {
-  const window = pick(body, key);
-  const resetsAt = pick(window, 'resets_at');
+function bucketReset(body: unknown, bucket: AnthropicBucket): ResetInfo | null {
+  const resetsAt = pick(pick(body, bucket.key), 'resets_at');
   if (typeof resetsAt !== 'string') {
     return null;
   }
@@ -74,20 +83,16 @@ function windowReset(body: unknown, key: string): ResetInfo | null {
   if (!Number.isFinite(ms) || ms <= 0) {
     return null;
   }
-  return { at: ms, source: 'usage-api', window: key };
+  return { at: ms, source: 'usage-api', window: bucket.window };
 }
 
-function isWindowExhausted(body: unknown, key: string): boolean | null {
-  const window = pick(body, key);
-  const utilization = pick(window, 'utilization');
-  if (typeof utilization === 'number') {
-    return utilization >= 100;
-  }
-  return null;
+function isBucketExhausted(body: unknown, bucket: AnthropicBucket): boolean {
+  const utilization = pick(pick(body, bucket.key), 'utilization');
+  return typeof utilization === 'number' && utilization >= 100;
 }
 
 export async function fetchAnthropicReset(
-  args: { token: string; userAgent?: string | undefined } & FetchDeps,
+  args: { token: string; modelId: string; userAgent?: string | undefined } & FetchDeps,
 ): Promise<UsageResult> {
   const doFetch = args.fetchImpl ?? defaultFetch();
 
@@ -121,9 +126,9 @@ export async function fetchAnthropicReset(
     return { ok: false, error: 'Anthropic usage API returned invalid JSON.' };
   }
 
-  const reset = anthropicResetFromBody(body);
+  const reset = anthropicResetFromBody(body, args.modelId);
   if (!reset) {
-    return { ok: false, error: 'Anthropic usage response carried no five_hour reset time.' };
+    return { ok: false, error: 'Anthropic usage response carried no usable reset time.' };
   }
 
   return { ok: true, reset };

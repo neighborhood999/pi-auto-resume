@@ -1,6 +1,7 @@
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
+import type { UsageLimitHit } from './providers/types.ts';
 import type { ResumeScheduleState } from './schedule.ts';
 
 type ResumeTheme = Pick<Theme, 'fg'>;
@@ -46,7 +47,7 @@ export function renderResumeCountdown(
 
   if (state.phase === 'resuming') {
     lines.push(bodyLine(inner, center(inner, `${pulse}  checking limit…`)));
-    lines.push(emptyLine(inner));
+    lines.push(limitLine(inner, state.hit));
   } else if (state.phase === 'waiting') {
     const remaining = state.wakeAt - now;
     if (state.hit.resetAt !== undefined) {
@@ -63,7 +64,7 @@ export function renderResumeCountdown(
         bodyLine(inner, center(inner, `next check in ${relativeCountdown(remaining, true)}`)),
       );
     }
-    lines.push(emptyLine(inner));
+    lines.push(limitLine(inner, state.hit));
   } else {
     lines.push(emptyLine(inner));
     lines.push(emptyLine(inner));
@@ -78,18 +79,27 @@ export function renderResumeCountdown(
 export function formatFooterStatus(state: ResumeScheduleState): string | undefined {
   if (state.phase === 'waiting' && state.hit.resetAt !== undefined) {
     const remaining = state.wakeAt - Date.now();
+    const limit = usageLimitLabel(state.hit) ?? 'limit';
     if (remaining >= DAY_MS) {
-      return `⏸ limit · resumes ${formatAbsoluteDate(state.wakeAt)}`;
+      return `⏸ ${limit} · resumes ${formatAbsoluteDate(state.wakeAt)}`;
     }
-    return `⏸ limit · resumes ${hhmm(state.wakeAt)} · ${relativeCountdown(remaining)}`;
+    return `⏸ ${limit} · resumes ${hhmm(state.wakeAt)} · ${relativeCountdown(remaining)}`;
   }
   if (state.phase === 'waiting') {
     return `⏸ limit · reset time unknown · next check in ${relativeCountdown(state.wakeAt - Date.now(), true)}`;
   }
   if (state.phase === 'resuming') {
-    return '⏸ limit · checking…';
+    return `⏸ ${usageLimitLabel(state.hit) ?? 'limit'} · checking…`;
   }
   return undefined;
+}
+
+/** Name the allowance that ran out, or `undefined` when the reset source did not say. */
+export function usageLimitLabel(hit: UsageLimitHit): string | undefined {
+  if (hit.resetAt === undefined || hit.window === undefined) {
+    return undefined;
+  }
+  return hit.window === 'weekly' ? 'weekly limit' : '5-hour limit';
 }
 
 /** Format an epoch as `HH:MM` in the local timezone. */
@@ -133,6 +143,11 @@ function bodyLine(inner: number, content: string): string {
   const bounded = truncateToWidth(content, inner, '…');
   const gap = Math.max(0, inner - visibleWidth(bounded));
   return `│${bounded}${' '.repeat(gap)}│`;
+}
+
+function limitLine(inner: number, hit: UsageLimitHit): string {
+  const label = usageLimitLabel(hit);
+  return label === undefined ? emptyLine(inner) : bodyLine(inner, center(inner, label));
 }
 
 function emptyLine(inner: number): string {

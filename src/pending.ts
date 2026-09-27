@@ -1,4 +1,9 @@
-import type { ProviderFamily, ResetSource, UsageLimitHit } from './providers/types.ts';
+import type {
+  ProviderFamily,
+  ResetSource,
+  UsageLimitHit,
+  UsageLimitWindow,
+} from './providers/types.ts';
 
 /** Version of the session custom-entry schema written by this extension. */
 export const PENDING_SCHEMA_VERSION = 1 as const;
@@ -51,6 +56,7 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   const family = input['family'];
   const resetAt = positiveFiniteOptional(input['resetAt']);
   const source = resetSourceOptional(input['source']);
+  const window = usageLimitWindowOptional(input['window']);
   const wakeAt = positiveFinite(input['wakeAt']);
   const attempt = positiveInteger(input['attempt']);
 
@@ -60,6 +66,7 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   if (
     resetAt === 'invalid' ||
     source === 'invalid' ||
+    window === 'invalid' ||
     wakeAt === undefined ||
     attempt === undefined
   ) {
@@ -68,7 +75,12 @@ export function parsePendingResumeState(input: unknown): ParsePendingResumeState
   const hit: UsageLimitHit =
     resetAt === undefined
       ? { provider: family, resetAt: undefined }
-      : { provider: family, resetAt, source: source ?? 'unrecorded' };
+      : {
+          provider: family,
+          resetAt,
+          source: source ?? 'unrecorded',
+          ...(window === undefined ? {} : { window }),
+        };
 
   return {
     ok: true,
@@ -95,6 +107,9 @@ export function pendingResumeEntryData(state: PendingResumeState): Record<string
     family: state.family,
     resetAt: state.hit.resetAt,
     source: state.hit.resetAt === undefined ? undefined : state.hit.source,
+    ...(state.hit.resetAt === undefined || state.hit.window === undefined
+      ? {}
+      : { window: state.hit.window }),
     wakeAt: state.wakeAt,
     attempt: state.attempt,
   };
@@ -132,6 +147,13 @@ function resetSourceOptional(value: unknown): ResetSource | undefined | 'invalid
     return undefined;
   }
   return RESET_SOURCES.find((source) => source === value) ?? 'invalid';
+}
+
+function usageLimitWindowOptional(value: unknown): UsageLimitWindow | undefined | 'invalid' {
+  if (value === undefined) {
+    return undefined;
+  }
+  return value === 'five_hour' || value === 'weekly' ? value : 'invalid';
 }
 
 function positiveInteger(value: unknown): number | undefined {

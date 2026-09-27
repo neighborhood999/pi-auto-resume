@@ -187,3 +187,63 @@ test('all rendered lines have consistent width', () => {
     );
   }
 });
+
+test('render names the weekly limit without changing the dialog size', () => {
+  const plain: ResumeScheduleState = {
+    phase: 'waiting',
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'usage-api' },
+    wakeAt: NOW + 3645_000,
+    attempt: 1,
+  };
+  const weekly: ResumeScheduleState = {
+    ...plain,
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'usage-api', window: 'weekly' },
+  };
+  const plainLines = renderResumeCountdown(plain, IDENTITY_THEME, NOW, 0, 'codex · gpt');
+  const weeklyLines = renderResumeCountdown(weekly, IDENTITY_THEME, NOW, 0, 'codex · gpt');
+  assert.ok(weeklyLines.join('\n').includes('weekly limit'));
+  assert.ok(!plainLines.join('\n').includes('limit\u0020'));
+  assert.equal(weeklyLines.length, plainLines.length);
+  const expectedWidth = visibleWidth(stripTerminalSequences(weeklyLines[0]!));
+  for (const line of weeklyLines) {
+    assert.equal(visibleWidth(stripTerminalSequences(line)), expectedWidth);
+  }
+});
+
+test('render names the five-hour limit while checking', () => {
+  const state: ResumeScheduleState = {
+    phase: 'resuming',
+    hit: { provider: 'codex', resetAt: NOW, source: 'usage-api', window: 'five_hour' },
+    attempt: 1,
+  };
+  const text = renderResumeCountdown(state, IDENTITY_THEME, NOW, 0, 'codex · gpt').join('\n');
+  assert.ok(text.includes('5-hour limit'));
+});
+
+test('formatFooterStatus names the weekly limit', () => {
+  const state: ResumeScheduleState = {
+    phase: 'waiting',
+    hit: { provider: 'codex', resetAt: NOW + 3600_000, source: 'usage-api', window: 'weekly' },
+    wakeAt: NOW + 3645_000,
+    attempt: 1,
+  };
+  assert.ok(formatFooterStatus(state)?.startsWith('⏸ weekly limit · resumes'));
+});
+
+test('formatFooterStatus keeps the limit label while resuming', () => {
+  const state: ResumeScheduleState = {
+    phase: 'resuming',
+    hit: { provider: 'codex', resetAt: NOW, source: 'usage-api', window: 'weekly' },
+    attempt: 1,
+  };
+  assert.equal(formatFooterStatus(state), '⏸ weekly limit · checking…');
+});
+
+test('formatFooterStatus falls back to a generic label while resuming an unknown window', () => {
+  const state: ResumeScheduleState = {
+    phase: 'resuming',
+    hit: { provider: 'codex', resetAt: undefined },
+    attempt: 1,
+  };
+  assert.equal(formatFooterStatus(state), '⏸ limit · checking…');
+});

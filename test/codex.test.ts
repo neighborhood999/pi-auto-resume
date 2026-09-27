@@ -82,6 +82,55 @@ test('codexResetFromBody reads reset_after_seconds', () => {
   assert.equal(result.at, NOW + 600_000);
 });
 
+test('codexResetFromBody picks the exhausted weekly window over the open five-hour window', () => {
+  const body = {
+    rate_limit: {
+      limit_reached: true,
+      primary_window: { used_percent: 86, reset_at: 1700003600 },
+      secondary_window: { used_percent: 100, reset_at: 1700040000 },
+    },
+  };
+  const result = codexResetFromBody(body, NOW);
+  assert.ok(result);
+  assert.equal(result.at, 1700040000 * 1000);
+  assert.equal(result.window, 'weekly');
+});
+
+test('codexResetFromBody picks the latest reset when both windows are exhausted', () => {
+  const body = {
+    rate_limit: {
+      primary_window: { used_percent: 100, reset_at: 1700003600 },
+      secondary_window: { used_percent: 100, reset_at: 1700040000 },
+    },
+  };
+  const result = codexResetFromBody(body, NOW);
+  assert.ok(result);
+  assert.equal(result.at, 1700040000 * 1000);
+});
+
+test('codexResetFromBody refuses the five-hour reset when the exhausted weekly has none', () => {
+  const body = {
+    rate_limit: {
+      primary_window: { used_percent: 40, reset_at: 1700003600 },
+      secondary_window: { used_percent: 100 },
+    },
+  };
+  assert.equal(codexResetFromBody(body, NOW), null);
+});
+
+test('codexResetFromBody keeps the five-hour window when only it is exhausted', () => {
+  const body = {
+    rate_limit: {
+      primary_window: { used_percent: 100, reset_at: 1700003600 },
+      secondary_window: { used_percent: 40, reset_at: 1700040000 },
+    },
+  };
+  const result = codexResetFromBody(body, NOW);
+  assert.ok(result);
+  assert.equal(result.at, 1700003600 * 1000);
+  assert.equal(result.window, 'five_hour');
+});
+
 test('codexResetFromBody returns null for empty body', () => {
   assert.equal(codexResetFromBody({}, NOW), null);
 });

@@ -1,5 +1,6 @@
 import { isAnthropicUsageLimit, parseAnthropicHeaders } from './anthropic.ts';
 import { isCodexUsageLimit, parseCodexErrorBody, parseCodexHeaders } from './codex.ts';
+import { parseClaudeBridgeReset } from './claude-bridge.ts';
 import type { ProviderFamily, UsageLimitHit, UsageLimitWindow } from './types.ts';
 
 export type { UsageLimitHit } from './types.ts';
@@ -45,11 +46,12 @@ const NON_RESUMABLE_PATTERNS = [
 const EVIDENCE_FRESHNESS_MS = 600_000;
 const FIVE_HOURS_MS = 5 * 3_600_000;
 
+/** Classify usage-limit semantics without changing the exact provider/model resume target. */
 export function providerFamily(provider: string): ProviderFamily | null {
   if (provider === 'openai-codex') {
     return 'codex';
   }
-  if (provider === 'anthropic') {
+  if (provider === 'anthropic' || provider === 'claude-bridge') {
     return 'anthropic';
   }
   return null;
@@ -158,16 +160,19 @@ export function createUsageLimitDetector(): UsageLimitDetector {
         };
       }
 
-      if (family === 'codex') {
-        const bodyReset = parseCodexErrorBody(currentRunError.errorMessage, now);
-        if (bodyReset) {
-          return {
-            provider: family,
-            resetAt: bodyReset,
-            source: 'body',
-            window: windowFromResetDistance(bodyReset, now),
-          };
-        }
+      const isBridge = currentRunError.provider === 'claude-bridge';
+      const bodyReset = isBridge
+        ? parseClaudeBridgeReset(currentRunError.errorMessage, now)
+        : family === 'codex'
+          ? parseCodexErrorBody(currentRunError.errorMessage, now)
+          : undefined;
+      if (bodyReset !== undefined) {
+        return {
+          provider: family,
+          resetAt: bodyReset,
+          source: 'body',
+          window: isBridge ? 'five_hour' : windowFromResetDistance(bodyReset, now),
+        };
       }
 
       return { provider: family, resetAt: undefined };

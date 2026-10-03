@@ -25,6 +25,11 @@ type ContextState = {
   idle: boolean;
   readonly entries: TestEntry[];
   readonly hasUI: boolean;
+  readonly mode: 'rpc' | 'tui';
+  readonly overlays: Array<{
+    readonly overlay?: boolean;
+    readonly overlayOptions?: { readonly anchor?: string };
+  }>;
   readonly notifications: string[];
   readonly statuses: Map<string, string | undefined>;
   readonly sentMessages: string[];
@@ -97,12 +102,23 @@ function makeContext(state: ContextState): ExtensionContext {
       confirm: async () => state.confirm(),
       notify: (message: string) => state.notifications.push(message),
       setStatus: (key: string, text: string | undefined) => state.statuses.set(key, text),
-      custom: () => undefined,
+      custom: (
+        _factory: unknown,
+        options?: {
+          readonly overlay?: boolean;
+          readonly overlayOptions?: { readonly anchor?: string };
+        },
+      ) => {
+        if (options) {
+          state.overlays.push(options);
+        }
+        return Promise.resolve(undefined);
+      },
       select: async () => undefined,
       input: async () => undefined,
       onTerminalInput: () => () => undefined,
     },
-    mode: 'rpc',
+    mode: state.mode,
     hasUI: state.hasUI,
     cwd: '/tmp/pi-auto-resume-test',
     sessionManager: {
@@ -134,6 +150,7 @@ function makeHarness(
   options?: {
     readonly entries?: TestEntry[];
     readonly hasUI?: boolean;
+    readonly mode?: 'rpc' | 'tui';
     readonly random?: () => number;
   },
 ): {
@@ -147,6 +164,8 @@ function makeHarness(
     idle: true,
     entries: options?.entries ? [...options.entries] : [],
     hasUI: options?.hasUI ?? true,
+    mode: options?.mode ?? 'rpc',
+    overlays: [],
     notifications,
     statuses: new Map(),
     sentMessages: [],
@@ -221,6 +240,223 @@ async function armKnownLimit(
   );
   await api.emit('agent_settled', { type: 'agent_settled' }, ctx);
 }
+
+test('captured Claude bridge failure arms a top-right reset countdown without metadata', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-02T16:00:29.411Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  let credentialLookups = 0;
+  harness.state.getApiKey = async () => {
+    credentialLookups += 1;
+    return undefined;
+  };
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  });
+
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'agent_end',
+    {
+      type: 'agent_end',
+      messages: [
+        assistantError(
+          model,
+          "Claude rate limit (five_hour) — resets 2:00:00 AM: You've hit your session limit · resets 2am (Asia/Taipei)",
+        ),
+      ],
+    },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+
+  assert.equal(harness.state.overlays.length, 1);
+  assert.equal(harness.state.overlays[0]?.overlay, true);
+  assert.equal(harness.state.overlays[0]?.overlayOptions?.anchor, 'top-right');
+  const pending = harness.api.appendedEntries.find(
+    (entry) => entry.customType === 'auto-resume/pending',
+  );
+  assert.ok(pending?.data);
+  assert.equal(pending.data['provider'], 'claude-bridge');
+  assert.equal(pending.data['modelId'], 'claude-opus-5-5');
+  assert.equal(pending.data['resetAt'], Date.parse('2026-10-02T18:00:00Z'));
+  assert.equal(pending.data['wakeAt'], Date.parse('2026-10-02T18:00:45Z'));
+  assert.equal(pending.data['source'], 'body');
+  assert.equal(pending.data['window'], 'five_hour');
+  assert.equal(credentialLookups, 0);
+
+  await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  for (const selectedModel of [
+    model,
+    { ...model, provider: 'anthropic' },
+    { ...model, id: 'claude-other' },
+  ]) {
+    const restarted = makeHarness(selectedModel, { entries: [pending], mode: 'tui' });
+    try {
+      await restarted.api.emit(
+        'session_start',
+        { type: 'session_start', reason: 'startup' },
+        restarted.ctx,
+      );
+      if (selectedModel === model) {
+        const restored = restarted.api.appendedEntries.find(
+          (entry) => entry.customType === 'auto-resume/pending',
+        );
+        assert.equal(restored?.data?.['provider'], 'claude-bridge');
+        assert.equal(restored?.data?.['modelId'], 'claude-opus-5-5');
+        assert.equal(restored?.data?.['wakeAt'], Date.parse('2026-10-02T18:00:45Z'));
+        await resumeNow(restarted);
+        assert.equal(restarted.state.sentMessages.length, 1);
+        assert.deepEqual(restarted.state.model, model);
+      } else {
+        assert.equal(restarted.state.confirmCalls, 0);
+        assert.equal(restarted.state.overlays.length, 0);
+        assert.equal(restarted.state.sentMessages.length, 0);
+        assert.equal(resolvedCount(restarted), 1);
+      }
+    } finally {
+      await restarted.api.emit('session_shutdown', { type: 'session_shutdown' }, restarted.ctx);
+    }
+  }
+});
+
+test('unsupported Claude bridge resets stay unknown without an OAuth lookup', async (t) => {
+  const now = Date.parse('2026-10-02T16:00:29.411Z');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const cases = [
+    { now, error: 'Claude rate limit (five_hour) — resets 2:00:00 AM: session limit' },
+    { now, error: 'Claude rate limit (five_hour): session limit · resets 2am' },
+    { now, error: 'Claude rate limit (seven_day): usage limit · resets 2am (Asia/Taipei)' },
+    { now, error: 'Claude rate limit (five_hour): session limit · resets 13am (Asia/Taipei)' },
+    { now, error: 'Claude rate limit (five_hour): session limit · resets 2:60am (Asia/Taipei)' },
+    { now, error: 'Claude rate limit (five_hour): session limit · resets 2am (Invalid/Zone)' },
+    { now, error: 'Claude rate limit (five_hour): session limit · resets 8am (Asia/Taipei)' },
+    {
+      now,
+      error: 'Claude rate limit (five_hour): session limit · resets tomorrow 2am (Asia/Taipei)',
+    },
+    {
+      now: Date.parse('2026-11-01T04:30:00Z'),
+      error: 'Claude rate limit (five_hour): session limit · resets 1:30am (America/New_York)',
+    },
+    {
+      now: Date.parse('2026-03-08T06:00:00Z'),
+      error: 'Claude rate limit (five_hour): session limit · resets 2:30am (America/New_York)',
+    },
+  ];
+  for (const item of cases) {
+    t.mock.timers.setTime(item.now);
+    const harness = makeHarness(model, { mode: 'tui' });
+    let credentialLookups = 0;
+    harness.state.getApiKey = async () => {
+      credentialLookups += 1;
+      return undefined;
+    };
+    try {
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        { type: 'agent_end', messages: [assistantError(model, item.error)] },
+        harness.ctx,
+      );
+      await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+
+      const pending = harness.api.appendedEntries.find(
+        (entry) => entry.customType === 'auto-resume/pending',
+      );
+      assert.ok(pending?.data, item.error);
+      assert.equal(pending.data['resetAt'], undefined, item.error);
+      assert.equal(pending.data['source'], undefined);
+      assert.equal(pending.data['wakeAt'], item.now + 600_000);
+      assert.equal(pending.data['provider'], model.provider);
+      assert.equal(pending.data['modelId'], model.id);
+      assert.equal(credentialLookups, 0, item.error);
+      assert.equal(harness.state.overlays.length, 1);
+    } finally {
+      await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+    }
+  }
+});
+
+test('Claude bridge reset clocks handle meridiem, date rollover, offsets and DST without host timezone', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-02T15:00:00Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  for (const item of [
+    { now: '2026-10-02T15:00:00Z', clock: '12am (Asia/Taipei)', reset: '2026-10-02T16:00:00Z' },
+    { now: '2026-10-02T02:00:00Z', clock: '12pm (Asia/Taipei)', reset: '2026-10-02T04:00:00Z' },
+    {
+      now: '2026-10-02T18:00:00Z',
+      clock: '1:15am (Asia/Kathmandu)',
+      reset: '2026-10-02T19:30:00Z',
+    },
+    {
+      now: '2026-03-08T06:00:00Z',
+      clock: '3:30am (America/New_York)',
+      reset: '2026-03-08T07:30:00Z',
+    },
+  ]) {
+    t.mock.timers.setTime(Date.parse(item.now));
+    const harness = makeHarness(model);
+    try {
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [
+            assistantError(
+              model,
+              `Claude rate limit (five_hour) — resets 11:00:00 PM: session limit · resets ${item.clock}`,
+            ),
+          ],
+        },
+        harness.ctx,
+      );
+      await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+      const pending = harness.api.appendedEntries.find(
+        (entry) => entry.customType === 'auto-resume/pending',
+      );
+      assert.equal(pending?.data?.['resetAt'], Date.parse(item.reset), item.clock);
+      assert.equal(pending?.data?.['source'], 'body');
+    } finally {
+      await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+    }
+  }
+});
+
+test('Claude bridge metadata and response headers retain priority over reset text', async (t) => {
+  const now = Date.parse('2026-10-02T16:00:29.411Z');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  for (const metadata of [undefined, { resetsAt: (now + 120_000) / 1000 }]) {
+    const harness = makeHarness(model);
+    try {
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'after_provider_response',
+        { type: 'after_provider_response', status: 429, headers: { 'retry-after': '60' } },
+        harness.ctx,
+      );
+      const message = assistantError(
+        model,
+        'Claude rate limit (five_hour): session limit · resets 2am (Asia/Taipei)',
+      );
+      if (metadata) {
+        message['errorMetadata'] = metadata;
+      }
+      await harness.api.emit('agent_end', { type: 'agent_end', messages: [message] }, harness.ctx);
+      await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+      const pending = harness.api.appendedEntries.find(
+        (entry) => entry.customType === 'auto-resume/pending',
+      );
+      assert.equal(pending?.data?.['resetAt'], now + (metadata ? 120_000 : 60_000));
+      assert.equal(pending?.data?.['source'], metadata ? 'metadata' : 'header');
+    } finally {
+      await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+    }
+  }
+});
 
 test('usage fallback diagnostics are one-line and credential-sanitized', () => {
   const message = sanitizeDiagnostic('Bearer secret-token token=abc api_key=def\\nsecond line');

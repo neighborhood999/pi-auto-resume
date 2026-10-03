@@ -492,6 +492,12 @@ export default function autoResume(
       return undefined;
     }
 
+    // Claude bridge runs through Claude Code's SDK, not Pi's Anthropic OAuth
+    // credentials. Its provider key is a placeholder, not a usage-API token.
+    if (guard.target.provider === 'claude-bridge') {
+      return hit;
+    }
+
     try {
       const token = await ctx.modelRegistry.getApiKeyForProvider(guard.target.provider);
       if (!classificationIsCurrent(guard, ctx)) {

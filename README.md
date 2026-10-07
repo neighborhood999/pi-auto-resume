@@ -23,6 +23,18 @@ The extension does not resume billing, credit, or plan errors. Those errors do n
 4. The extension waits until the reset time, plus `bufferMs` and a random delay of up to `jitterMs`.
 5. The extension sends `resumePrompt` to the same provider and model.
 
+During the wait, the extension shows this countdown in the top-right corner of the TUI:
+
+```text
+┌─ ⏸ Reached Usage Limit ────────────┐
+│                                    │
+│        ◐  resumes at 14:30         │
+│             in 90 min              │
+│            5-hour limit            │
+│ anthropic · Claude Opus 5.5 (high) │
+└────────────────────────────────────┘
+```
+
 If the provider does not send a reset time, the extension waits `pollIntervalMs`. Each new limit after a resume counts as one more attempt. After `maxAttempts`, the extension stops.
 
 If pi restarts during a wait, the extension asks you to re-arm the resume. It re-arms only when the current model is the model of the interrupted turn.

@@ -10,15 +10,16 @@ test('detects Codex usage limit with friendly message and parses reset time', ()
   d.onProviderResponse('openai-codex', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'You have hit your ChatGPT usage limit. Try again in ~42 min.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 1000);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'codex');
   assert.ok(hit.resetAt);
-  const expected = NOW + 1000 + 42 * 60 * 1000;
+  const expected = NOW + 42 * 60 * 1000;
   assert.equal(hit.resetAt, expected);
 });
 
@@ -28,11 +29,12 @@ test('detects Anthropic usage limit with unified-reset header', () => {
   d.onProviderResponse('anthropic', 429, { 'anthropic-ratelimit-unified-reset': resetDate }, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate limit exceeded',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'anthropic');
   assert.ok(hit.resetAt);
@@ -44,11 +46,12 @@ test('detects Anthropic usage limit with retry-after header', () => {
   d.onProviderResponse('anthropic', 429, { 'retry-after': '300' }, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate limit exceeded',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'anthropic');
   assert.ok(hit.resetAt);
@@ -60,12 +63,13 @@ test('Error followed by NonError clears stale evidence and run error', () => {
   d.onProviderResponse('openai-codex', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'usage_limit_reached',
     resetsAt: undefined,
   });
   d.onRunEnd({ _tag: 'NonError' });
-  assert.equal(d.classify(NOW), undefined);
+  assert.equal(d.consumeSettledLimit(), undefined);
 });
 
 test('attempt start isolates rate-limit evidence from the next retry', () => {
@@ -74,6 +78,7 @@ test('attempt start isolates rate-limit evidence from the next retry', () => {
   d.onProviderResponse('anthropic', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate_limit_error',
     resetsAt: undefined,
@@ -82,12 +87,13 @@ test('attempt start isolates rate-limit evidence from the next retry', () => {
   d.onRunStart();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'internal server error',
     resetsAt: undefined,
   });
 
-  assert.equal(d.classify(NOW + 500), undefined);
+  assert.equal(d.consumeSettledLimit(), undefined);
 });
 
 test('final exhausted attempt still classifies its own limit evidence', () => {
@@ -96,11 +102,12 @@ test('final exhausted attempt still classifies its own limit evidence', () => {
   d.onProviderResponse('anthropic', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'internal server error',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'anthropic');
 });
@@ -109,17 +116,19 @@ test('newest Error observation wins', () => {
   const d = createUsageLimitDetector();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'usage_limit_reached',
     resetsAt: undefined,
   });
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate limit exceeded',
     resetsAt: NOW + 60_000,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'anthropic');
   assert.equal(hit.resetAt, NOW + 60_000);
@@ -130,11 +139,12 @@ test('cross-family 429 evidence is rejected', () => {
   d.onProviderResponse('anthropic', 429, { 'retry-after': '300' }, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'usage_limit_reached',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'codex');
   assert.equal(hit.resetAt, undefined);
@@ -145,11 +155,12 @@ test('429 evidence exactly 600 seconds old is stale', () => {
   d.onProviderResponse('anthropic', 429, { 'retry-after': '300' }, NOW - 600_000);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate limit exceeded',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.resetAt, undefined);
 });
@@ -159,11 +170,12 @@ test('mixed-case rate-limit headers are normalized', () => {
   d.onProviderResponse('anthropic', 429, { 'Retry-After': '300' }, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate limit exceeded',
     resetsAt: undefined,
   });
-  assert.equal(d.classify(NOW + 1)?.resetAt, NOW + 300_000);
+  assert.equal(d.consumeSettledLimit()?.resetAt, NOW + 300_000);
 });
 
 test('ordinary openai provider is ignored', () => {
@@ -171,17 +183,18 @@ test('ordinary openai provider is ignored', () => {
   d.onProviderResponse('openai', 429, { 'retry-after': '300' }, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai',
     errorMessage: 'usage limit exceeded',
     resetsAt: undefined,
   });
-  assert.equal(d.classify(NOW), undefined);
+  assert.equal(d.consumeSettledLimit(), undefined);
 });
 
 test('returns undefined when no run error', () => {
   const d = createUsageLimitDetector();
   d.onProviderResponse('openai-codex', 429, {}, NOW);
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.equal(hit, undefined);
 });
 
@@ -190,11 +203,12 @@ test('returns undefined for billing/quota errors', () => {
   d.onProviderResponse('openai-codex', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'Your billing quota has been exhausted.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.equal(hit, undefined);
 });
 
@@ -203,11 +217,12 @@ test('returns undefined for usage_not_included', () => {
   d.onProviderResponse('openai-codex', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'usage_not_included: Your plan does not include this feature.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.equal(hit, undefined);
 });
 
@@ -216,27 +231,29 @@ test('ignores stale 429 evidence but still classifies from error message', () =>
   d.onProviderResponse('openai-codex', 429, {}, NOW - 700_000);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'usage_limit_reached',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'codex');
 });
 
-test('classify consumes evidence', () => {
+test('consumeSettledLimit consumes evidence', () => {
   const d = createUsageLimitDetector();
   d.onProviderResponse('openai-codex', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'usage_limit_reached',
     resetsAt: undefined,
   });
-  const first = d.classify(NOW + 500);
+  const first = d.consumeSettledLimit();
   assert.ok(first);
-  const second = d.classify(NOW + 1000);
+  const second = d.consumeSettledLimit();
   assert.equal(second, undefined);
 });
 
@@ -244,11 +261,12 @@ test('detects limit from error message alone without 429 evidence', () => {
   const d = createUsageLimitDetector();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'You have hit your ChatGPT usage limit. Try again in ~15 min.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'codex');
   assert.equal(hit.resetAt, NOW + 15 * 60 * 1000);
@@ -259,11 +277,12 @@ test('detects 429 even with unrecognized error message', () => {
   d.onProviderResponse('anthropic', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'internal server error',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'anthropic');
   assert.equal(hit.resetAt, undefined);
@@ -273,11 +292,12 @@ test('returns undefined for unrecognized error without 429', () => {
   const d = createUsageLimitDetector();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'internal server error',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.equal(hit, undefined);
 });
 
@@ -286,11 +306,12 @@ test('detects real Codex error "The usage limit has been reached"', () => {
   d.onProviderResponse('openai-codex', 429, {}, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'Codex error: The usage limit has been reached',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'codex');
   assert.equal(hit.resetAt, undefined);
@@ -301,11 +322,12 @@ test('prefers structured resetsAt over error message parsing', () => {
   const structuredReset = NOW + 7200_000;
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'Codex error: The usage limit has been reached',
     resetsAt: structuredReset,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.resetAt, structuredReset);
 });
@@ -315,11 +337,12 @@ test('structured resetsAt passes through as-is (caller normalizes to ms)', () =>
   const resetMs = NOW + 3600_000;
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'Codex error: The usage limit has been reached',
     resetsAt: resetMs,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.resetAt, resetMs);
 });
@@ -328,11 +351,12 @@ test('falls back to error message parsing when resetsAt is undefined', () => {
   const d = createUsageLimitDetector();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'You have hit your ChatGPT usage limit. Try again in ~10 min.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.resetAt, NOW + 10 * 60 * 1000);
 });
@@ -342,11 +366,12 @@ test('uses provider from ctx.model, not hardcoded unknown', () => {
   d.onProviderResponse('anthropic', 429, { 'retry-after': '120' }, NOW);
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'anthropic',
     errorMessage: 'rate limit exceeded',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW + 500);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit);
   assert.equal(hit.provider, 'anthropic');
   assert.equal(hit.resetAt, NOW + 120 * 1000);
@@ -356,11 +381,12 @@ test('labels a reset more than five hours away as the weekly limit', () => {
   const d = createUsageLimitDetector();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'You have hit your ChatGPT usage limit (plus plan). Try again in ~761 min.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit?.resetAt);
   assert.equal(hit.window, 'weekly');
 });
@@ -369,11 +395,12 @@ test('leaves a reset within five hours unlabeled because either limit fits', () 
   const d = createUsageLimitDetector();
   d.onRunEnd({
     _tag: 'Error',
+    failedAt: NOW,
     provider: 'openai-codex',
     errorMessage: 'You have hit your ChatGPT usage limit. Try again in ~42 min.',
     resetsAt: undefined,
   });
-  const hit = d.classify(NOW);
+  const hit = d.consumeSettledLimit();
   assert.ok(hit?.resetAt);
   assert.equal(hit.window, undefined);
 });

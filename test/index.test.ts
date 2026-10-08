@@ -201,6 +201,10 @@ function assistantMessage(model: TestModel, stopReason: string): Record<string, 
   return { role: 'assistant', provider: model.provider, model: model.id, stopReason };
 }
 
+function makeEmptyAssistantResponse(model: TestModel): Record<string, unknown> {
+  return { ...assistantMessage(model, 'stop'), content: [], usage: { totalTokens: 0 } };
+}
+
 async function resumeNow(harness: ReturnType<typeof makeHarness>): Promise<void> {
   assert.ok(harness.api.command);
   await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
@@ -240,6 +244,393 @@ async function armKnownLimit(
   );
   await api.emit('agent_settled', { type: 'agent_settled' }, ctx);
 }
+
+test('delayed empty retries preserve the reset classified at failure time', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T06:00:00Z') });
+  const cases = [
+    {
+      provider: 'claude-bridge',
+      failedAt: '2026-10-08T07:09:59Z',
+      settledAt: '2026-10-08T07:10:01Z',
+      error:
+        "Claude rate limit (five_hour) — resets 3:10:00 PM: You've hit your session limit · resets 3:10pm (Asia/Taipei)",
+      headers: undefined,
+      resetAt: '2026-10-08T07:10:00Z',
+      wakeAt: '2026-10-08T07:10:45Z',
+      source: 'body',
+    },
+    {
+      provider: 'openai-codex',
+      failedAt: '2026-10-08T06:00:00Z',
+      settledAt: '2026-10-08T06:01:00Z',
+      error: 'You have hit your ChatGPT usage limit. Try again in ~15 min.',
+      headers: undefined,
+      resetAt: '2026-10-08T06:15:00Z',
+      wakeAt: '2026-10-08T06:15:45Z',
+      source: 'body',
+    },
+    {
+      provider: 'claude-bridge',
+      failedAt: '2026-10-08T06:00:00Z',
+      settledAt: '2026-10-08T06:11:00Z',
+      error: 'internal server error',
+      headers: { 'retry-after': '1200' },
+      resetAt: '2026-10-08T06:20:00Z',
+      wakeAt: '2026-10-08T06:20:45Z',
+      source: 'header',
+    },
+  ];
+  for (const item of cases) {
+    t.mock.timers.setTime(Date.parse(item.failedAt));
+    const model = { provider: item.provider, id: 'test-model', name: 'Test model' };
+    const harness = makeHarness(model, { mode: 'tui' });
+    try {
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      if (item.headers) {
+        await harness.api.emit(
+          'after_provider_response',
+          {
+            type: 'after_provider_response',
+            status: 429,
+            headers: item.headers,
+          },
+          harness.ctx,
+        );
+      }
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [assistantError(model, item.error)],
+        },
+        harness.ctx,
+      );
+      t.mock.timers.setTime(Date.parse(item.settledAt));
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [makeEmptyAssistantResponse(model)],
+        },
+        harness.ctx,
+      );
+      await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+      const pending = harness.api.appendedEntries.find(
+        (entry) => entry.customType === 'auto-resume/pending',
+      );
+      assert.equal(pending?.data?.['resetAt'], Date.parse(item.resetAt), item.provider);
+      assert.equal(pending?.data?.['wakeAt'], Date.parse(item.wakeAt), item.provider);
+      assert.equal(pending?.data?.['source'], item.source, item.provider);
+    } finally {
+      await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+    }
+  }
+});
+
+test('real tool output before an empty terminal response clears the preceding limit', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T05:15:49.151Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  });
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'agent_end',
+    {
+      type: 'agent_end',
+      messages: [assistantError(model, 'rate limit exceeded')],
+    },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  const toolOutput = {
+    ...assistantMessage(model, 'toolUse'),
+    content: [
+      { type: 'toolCall', id: 'recovered-tool', name: 'read', arguments: { path: 'README.md' } },
+    ],
+    usage: { totalTokens: 1 },
+  };
+  await harness.api.emit('message_end', { type: 'message_end', message: toolOutput }, harness.ctx);
+  const empty = makeEmptyAssistantResponse(model);
+  await harness.api.emit('message_end', { type: 'message_end', message: empty }, harness.ctx);
+  await harness.api.emit(
+    'agent_end',
+    {
+      type: 'agent_end',
+      messages: [toolOutput, empty],
+    },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+  assert.equal(harness.state.overlays.length, 0);
+  assert.equal(harness.api.appendedEntries.length, 0);
+});
+
+test('captured Claude bridge limit survives an empty zero-token retry at settlement', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T05:15:47.104Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  });
+
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'agent_end',
+    {
+      type: 'agent_end',
+      messages: [
+        assistantError(
+          model,
+          "Claude rate limit (five_hour) — resets 3:10:00 PM: You've hit your session limit · resets 3:10pm (Asia/Taipei)",
+        ),
+      ],
+    },
+    harness.ctx,
+  );
+  t.mock.timers.setTime(Date.parse('2026-10-08T05:15:49.151Z'));
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  const emptyRetry = makeEmptyAssistantResponse(model);
+  await harness.api.emit('message_end', { type: 'message_end', message: emptyRetry }, harness.ctx);
+  await harness.api.emit('agent_end', { type: 'agent_end', messages: [emptyRetry] }, harness.ctx);
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+
+  assert.equal(harness.state.overlays.length, 1);
+  assert.equal(harness.state.overlays[0]?.overlayOptions?.anchor, 'top-right');
+  const pending = harness.api.appendedEntries.find(
+    (entry) => entry.customType === 'auto-resume/pending',
+  );
+  assert.equal(pending?.data?.['resetAt'], Date.parse('2026-10-08T07:10:00Z'));
+  assert.equal(pending?.data?.['wakeAt'], Date.parse('2026-10-08T07:10:45Z'));
+  assert.equal(pending?.data?.['provider'], model.provider);
+  assert.equal(pending?.data?.['modelId'], model.id);
+  assert.equal(pending?.data?.['source'], 'body');
+});
+
+test('multiple empty retries retain only the original failed attempt headers', async (t) => {
+  const now = Date.parse('2026-10-08T05:15:47.104Z');
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  });
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit(
+    'after_provider_response',
+    {
+      type: 'after_provider_response',
+      status: 429,
+      headers: { 'retry-after': '60' },
+    },
+    harness.ctx,
+  );
+  await harness.api.emit(
+    'agent_end',
+    {
+      type: 'agent_end',
+      messages: [assistantError(model, 'internal server error')],
+    },
+    harness.ctx,
+  );
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+    await harness.api.emit(
+      'after_provider_response',
+      {
+        type: 'after_provider_response',
+        status: 429,
+        headers: { 'retry-after': '3600' },
+      },
+      harness.ctx,
+    );
+    await harness.api.emit(
+      'agent_end',
+      {
+        type: 'agent_end',
+        messages: [makeEmptyAssistantResponse(model)],
+      },
+      harness.ctx,
+    );
+  }
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+  const pending = harness.api.appendedEntries.find(
+    (entry) => entry.customType === 'auto-resume/pending',
+  );
+  assert.equal(pending?.data?.['resetAt'], now + 60_000);
+  assert.equal(pending?.data?.['source'], 'header');
+  assert.equal(harness.state.overlays.length, 1);
+});
+
+test('empty retries cannot announce recovery during an auto-resumed limit run', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T05:15:49.151Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  });
+  await armKnownLimit(harness);
+  await resumeNow(harness);
+  await harness.api.emit(
+    'agent_end',
+    {
+      type: 'agent_end',
+      messages: [assistantError(model, 'rate limit exceeded')],
+    },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  const emptyRetry = makeEmptyAssistantResponse(model);
+  await harness.api.emit('message_end', { type: 'message_end', message: emptyRetry }, harness.ctx);
+  await harness.api.emit('agent_end', { type: 'agent_end', messages: [emptyRetry] }, harness.ctx);
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+
+  assert.equal(harness.state.bells, 0);
+  assert.equal(harness.state.notifications.includes('✓ usage limit lifted — resuming task'), false);
+  assert.equal(resolvedCount(harness), 0);
+  assert.equal(harness.api.appendedEntries.at(-1)?.data?.['attempt'], 2);
+  assert.match(harness.state.statuses.get('autoresume') ?? '', /limit/);
+});
+
+test('only an empty zero-token retry from the failed target retains a limit', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T05:15:49.151Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const emptyRetry = makeEmptyAssistantResponse(model);
+  const cases = [
+    {
+      name: 'real text',
+      response: { ...emptyRetry, content: [{ type: 'text', text: 'Recovered' }] },
+    },
+    { name: 'tool use', response: { ...emptyRetry, stopReason: 'toolUse' } },
+    { name: 'nonzero tokens', response: { ...emptyRetry, usage: { totalTokens: 1 } } },
+    { name: 'missing usage', response: { ...assistantMessage(model, 'stop'), content: [] } },
+    { name: 'aborted', response: { ...emptyRetry, stopReason: 'aborted' } },
+    { name: 'newer ordinary error', response: assistantError(model, 'internal server error') },
+    { name: 'different provider', response: { ...emptyRetry, provider: 'anthropic' } },
+    { name: 'different model', response: { ...emptyRetry, model: 'claude-other' } },
+  ];
+  for (const item of cases) {
+    const harness = makeHarness(model, { mode: 'tui' });
+    try {
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [assistantError(model, 'rate limit exceeded')],
+        },
+        harness.ctx,
+      );
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [item.response],
+        },
+        harness.ctx,
+      );
+      await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+      assert.equal(harness.state.overlays.length, 0, item.name);
+      assert.equal(harness.api.appendedEntries.length, 0, item.name);
+    } finally {
+      await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+    }
+  }
+});
+
+test('empty responses alone or after settlement never invent a limit', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T05:15:49.151Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  });
+  const empty = makeEmptyAssistantResponse(model);
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit('agent_end', { type: 'agent_end', messages: [empty] }, harness.ctx);
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+  assert.equal(harness.state.overlays.length, 0);
+
+  await armKnownLimit(harness);
+  assert.ok(harness.api.command);
+  // SAFETY: cancel uses only the ExtensionContext fields supplied by makeContext.
+  await harness.api.command('cancel', harness.ctx as unknown as ExtensionCommandContext);
+  const checkpointCount = harness.api.appendedEntries.length;
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+  await harness.api.emit('agent_end', { type: 'agent_end', messages: [empty] }, harness.ctx);
+  await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+  assert.equal(harness.api.appendedEntries.length, checkpointCount);
+  assert.equal(harness.state.overlays.length, 1);
+});
+
+test('session and model changes discard a limit before an empty retry', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-08T05:15:49.151Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  for (const change of ['session', 'shutdown', 'model']) {
+    const harness = makeHarness(model, { mode: 'tui' });
+    try {
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [assistantError(model, 'rate limit exceeded')],
+        },
+        harness.ctx,
+      );
+      if (change === 'model') {
+        const otherModel = { ...model, id: 'claude-other' };
+        harness.state.model = otherModel;
+        await harness.api.emit(
+          'model_select',
+          {
+            type: 'model_select',
+            model: otherModel,
+            previousModel: model,
+            source: 'set',
+          },
+          harness.ctx,
+        );
+        harness.state.model = model;
+        await harness.api.emit(
+          'model_select',
+          {
+            type: 'model_select',
+            model,
+            previousModel: otherModel,
+            source: 'set',
+          },
+          harness.ctx,
+        );
+      } else if (change === 'shutdown') {
+        await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+      } else {
+        await harness.api.emit(
+          'session_start',
+          { type: 'session_start', reason: 'new' },
+          harness.ctx,
+        );
+      }
+      await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+      await harness.api.emit(
+        'agent_end',
+        {
+          type: 'agent_end',
+          messages: [makeEmptyAssistantResponse(model)],
+        },
+        harness.ctx,
+      );
+      await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+      assert.equal(harness.state.overlays.length, 0, change);
+      assert.equal(harness.api.appendedEntries.length, 0, change);
+    } finally {
+      await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+    }
+  }
+});
 
 test('captured Claude bridge failure arms a top-right reset countdown without metadata', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-02T16:00:29.411Z') });

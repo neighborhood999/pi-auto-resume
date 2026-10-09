@@ -187,22 +187,42 @@ function makeHarness(
   return { api, ctx: makeContext(state), state };
 }
 
+function makeUsage(totalTokens: number): Record<string, unknown> {
+  return {
+    input: totalTokens,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
 function assistantError(model: TestModel, errorMessage: string): Record<string, unknown> {
   return {
     role: 'assistant',
     provider: model.provider,
     model: model.id,
+    content: [],
+    usage: makeUsage(0),
     stopReason: 'error',
     errorMessage,
   };
 }
 
 function assistantMessage(model: TestModel, stopReason: string): Record<string, unknown> {
-  return { role: 'assistant', provider: model.provider, model: model.id, stopReason };
+  return {
+    role: 'assistant',
+    provider: model.provider,
+    model: model.id,
+    content: [{ type: 'text', text: 'Done' }],
+    usage: makeUsage(1),
+    stopReason,
+  };
 }
 
 function makeEmptyAssistantResponse(model: TestModel): Record<string, unknown> {
-  return { ...assistantMessage(model, 'stop'), content: [], usage: { totalTokens: 0 } };
+  return { ...assistantMessage(model, 'stop'), content: [], usage: makeUsage(0) };
 }
 
 async function resumeNow(harness: ReturnType<typeof makeHarness>): Promise<void> {
@@ -350,7 +370,7 @@ test('real tool output before an empty terminal response clears the preceding li
     content: [
       { type: 'toolCall', id: 'recovered-tool', name: 'read', arguments: { path: 'README.md' } },
     ],
-    usage: { totalTokens: 1 },
+    usage: makeUsage(1),
   };
   await harness.api.emit('message_end', { type: 'message_end', message: toolOutput }, harness.ctx);
   const empty = makeEmptyAssistantResponse(model);
@@ -504,8 +524,7 @@ test('only an empty zero-token retry from the failed target retains a limit', as
       response: { ...emptyRetry, content: [{ type: 'text', text: 'Recovered' }] },
     },
     { name: 'tool use', response: { ...emptyRetry, stopReason: 'toolUse' } },
-    { name: 'nonzero tokens', response: { ...emptyRetry, usage: { totalTokens: 1 } } },
-    { name: 'missing usage', response: { ...assistantMessage(model, 'stop'), content: [] } },
+    { name: 'nonzero tokens', response: { ...emptyRetry, usage: makeUsage(1) } },
     { name: 'aborted', response: { ...emptyRetry, stopReason: 'aborted' } },
     { name: 'newer ordinary error', response: assistantError(model, 'internal server error') },
     { name: 'different provider', response: { ...emptyRetry, provider: 'anthropic' } },

@@ -378,28 +378,22 @@ export default function autoResume(
       detector.onRunEnd({ _tag: 'NonError' });
       return;
     }
-    // SAFETY: Pi 0.84.4's AssistantMessage includes provider, model,
-    // stopReason, and errorMessage. Keep the runtime record projection here so
-    // this boundary remains compatible with the extension event typing.
-    const message = lastAssistant as unknown as Record<string, unknown>;
-    if (message['stopReason'] !== 'error' || typeof message['errorMessage'] !== 'string') {
+    if (lastAssistant.stopReason !== 'error' || lastAssistant.errorMessage === undefined) {
       const emptyRetry =
         isEmptyAssistantResponse(lastAssistant) &&
         targetModel !== undefined &&
-        message['provider'] === targetModel.provider &&
-        message['model'] === targetModel.modelId;
+        lastAssistant.provider === targetModel.provider &&
+        lastAssistant.model === targetModel.modelId;
       detector.onRunEnd({ _tag: emptyRetry ? 'Empty' : 'NonError' });
       return;
     }
-    const provider = typeof message['provider'] === 'string' ? message['provider'] : undefined;
-    const modelId = typeof message['model'] === 'string' ? message['model'] : undefined;
-    targetModel = makeTargetModel(provider, modelId, ctx);
+    targetModel = makeTargetModel(lastAssistant.provider, lastAssistant.model, ctx);
     refreshModelLabel(ctx);
     detector.onRunEnd({
       _tag: 'Error',
-      provider: provider ?? 'unknown',
-      errorMessage: message['errorMessage'],
-      resetsAt: extractResetsAt(message),
+      provider: lastAssistant.provider,
+      errorMessage: lastAssistant.errorMessage,
+      resetsAt: extractResetsAt(lastAssistant),
       failedAt: Date.now(),
     });
   });
@@ -789,10 +783,7 @@ export default function autoResume(
 
 function isEmptyAssistantResponse(message: AssistantMessage): boolean {
   return (
-    message.stopReason === 'stop' &&
-    Array.isArray(message.content) &&
-    message.content.length === 0 &&
-    message.usage?.totalTokens === 0
+    message.stopReason === 'stop' && message.content.length === 0 && message.usage.totalTokens === 0
   );
 }
 
@@ -827,11 +818,14 @@ function makeTargetModel(
 /**
  * Try to extract a reset epoch (ms) from structured metadata on the message.
  *
- * @param message - Framework message projected to an unknown-keyed record.
+ * @param message - Failed assistant message from the framework.
  * @returns A finite positive epoch in milliseconds, if present.
  */
-function extractResetsAt(message: Record<string, unknown>): number | undefined {
-  const metadata = message['errorMetadata'];
+function extractResetsAt(message: AssistantMessage): number | undefined {
+  // SAFETY: some providers attach `errorMetadata` at runtime, but
+  // AssistantMessage does not declare it, so read it through an unknown-keyed
+  // projection and validate every field below.
+  const metadata = (message as unknown as Record<string, unknown>)['errorMetadata'];
   if (typeof metadata === 'object' && metadata !== null) {
     const meta = metadata as Record<string, unknown>;
     const direct = meta['resetsAt'];

@@ -5,14 +5,12 @@ import type { ProviderFamily, UsageLimitHit, UsageLimitWindow } from './types.ts
 
 export type { UsageLimitHit } from './types.ts';
 
-/** An empty retry is not evidence of recovery. */
 export type RunEndObservation =
   | {
       readonly _tag: 'Error';
       readonly provider: string;
       readonly errorMessage: string;
       readonly resetsAt: number | undefined;
-      /** Epoch milliseconds at failure, not settlement. */
       readonly failedAt: number;
     }
   | { readonly _tag: 'Empty' }

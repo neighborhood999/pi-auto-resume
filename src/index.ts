@@ -2,7 +2,9 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  MessageEndEvent,
 } from '@earendil-works/pi-coding-agent';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 
 import { loadAutoResumeConfig, saveAutoResumeConfig } from './config.ts';
 import { ResumeCountdown } from './countdown.ts';
@@ -324,6 +326,7 @@ export default function autoResume(
       targetModel &&
       (targetModel.provider !== event.model.provider || targetModel.modelId !== event.model.id)
     ) {
+      detector.reset();
       if (schedule.phase === 'waiting' || schedule.phase === 'resuming') {
         cancelWithNotice(ctx, 'Auto-resume cancelled because the model changed.');
       } else {
@@ -363,7 +366,7 @@ export default function autoResume(
   });
 
   pi.on('agent_end', (event, ctx) => {
-    let lastAssistant: (typeof event.messages)[number] | undefined;
+    let lastAssistant: AssistantMessage | undefined;
     for (let index = event.messages.length - 1; index >= 0; index -= 1) {
       const candidate = event.messages[index];
       if (candidate?.role === 'assistant') {
@@ -375,31 +378,35 @@ export default function autoResume(
       detector.onRunEnd({ _tag: 'NonError' });
       return;
     }
-    // SAFETY: Pi 0.84.4's AssistantMessage includes provider, model,
-    // stopReason, and errorMessage. Keep the runtime record projection here so
-    // this boundary remains compatible with the extension event typing.
-    const message = lastAssistant as unknown as Record<string, unknown>;
-    if (message['stopReason'] !== 'error' || typeof message['errorMessage'] !== 'string') {
-      detector.onRunEnd({ _tag: 'NonError' });
+    if (lastAssistant.stopReason !== 'error' || lastAssistant.errorMessage === undefined) {
+      const emptyRetry =
+        isEmptyAssistantResponse(lastAssistant) &&
+        targetModel !== undefined &&
+        lastAssistant.provider === targetModel.provider &&
+        lastAssistant.model === targetModel.modelId;
+      detector.onRunEnd({ _tag: emptyRetry ? 'Empty' : 'NonError' });
       return;
     }
-    const provider = typeof message['provider'] === 'string' ? message['provider'] : undefined;
-    const modelId = typeof message['model'] === 'string' ? message['model'] : undefined;
-    targetModel = makeTargetModel(provider, modelId, ctx);
+    targetModel = makeTargetModel(lastAssistant.provider, lastAssistant.model, ctx);
     refreshModelLabel(ctx);
     detector.onRunEnd({
       _tag: 'Error',
-      provider: provider ?? 'unknown',
-      errorMessage: message['errorMessage'],
-      resetsAt: extractResetsAt(message),
+      provider: lastAssistant.provider,
+      errorMessage: lastAssistant.errorMessage,
+      resetsAt: extractResetsAt(lastAssistant),
+      failedAt: Date.now(),
     });
   });
 
   pi.on('message_end', (event, ctx) => {
+    const message = event.message;
+    // Intermediate output must clear stale limits even outside auto-resume.
+    if (isSuccessfulAssistant(message, targetModel)) {
+      detector.reset();
+    }
     if (schedule.phase !== 'resuming') {
       return;
     }
-    const message = event.message;
     if (
       resumePromptPreflight &&
       message.role === 'user' &&
@@ -424,7 +431,7 @@ export default function autoResume(
   });
 
   pi.on('agent_settled', async (_event, ctx) => {
-    const hit = detector.classify(Date.now());
+    const hit = detector.consumeSettledLimit();
     if (!enabled()) {
       if (schedule.phase === 'idle') {
         clearTargetModel();
@@ -547,6 +554,7 @@ export default function autoResume(
   }
 
   pi.on('session_shutdown', (_event, ctx) => {
+    detector.reset();
     tearDown(ctx);
     schedule = { phase: 'idle' };
     clearTargetModel();
@@ -560,6 +568,7 @@ export default function autoResume(
   pi.on('session_start', async (event, ctx) => {
     // A new session/reload owns a fresh lifecycle. Never let a previous
     // session's config or confirmation continuation mutate this one.
+    detector.reset();
     tearDown(ctx);
     schedule = { phase: 'idle' };
     clearTargetModel();
@@ -772,15 +781,24 @@ export default function autoResume(
   });
 }
 
-function isSuccessfulAssistant(message: unknown, target: TargetModel | undefined): boolean {
-  const record = message as Record<string, unknown> | null | undefined;
+function isEmptyAssistantResponse(message: AssistantMessage): boolean {
+  return (
+    message.stopReason === 'stop' && message.content.length === 0 && message.usage.totalTokens === 0
+  );
+}
+
+function isSuccessfulAssistant(
+  message: MessageEndEvent['message'],
+  target: TargetModel | undefined,
+): boolean {
   return (
     target !== undefined &&
-    record?.['role'] === 'assistant' &&
-    record['provider'] === target.provider &&
-    record['model'] === target.modelId &&
-    record['stopReason'] !== 'error' &&
-    record['stopReason'] !== 'aborted'
+    message.role === 'assistant' &&
+    message.provider === target.provider &&
+    message.model === target.modelId &&
+    message.stopReason !== 'error' &&
+    message.stopReason !== 'aborted' &&
+    !isEmptyAssistantResponse(message)
   );
 }
 
@@ -800,11 +818,14 @@ function makeTargetModel(
 /**
  * Try to extract a reset epoch (ms) from structured metadata on the message.
  *
- * @param message - Framework message projected to an unknown-keyed record.
+ * @param message - Failed assistant message from the framework.
  * @returns A finite positive epoch in milliseconds, if present.
  */
-function extractResetsAt(message: Record<string, unknown>): number | undefined {
-  const metadata = message['errorMetadata'];
+function extractResetsAt(message: AssistantMessage): number | undefined {
+  // SAFETY: some providers attach `errorMetadata` at runtime, but
+  // AssistantMessage does not declare it, so read it through an unknown-keyed
+  // projection and validate every field below.
+  const metadata = (message as unknown as Record<string, unknown>)['errorMetadata'];
   if (typeof metadata === 'object' && metadata !== null) {
     const meta = metadata as Record<string, unknown>;
     const direct = meta['resetsAt'];

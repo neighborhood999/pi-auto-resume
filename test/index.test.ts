@@ -738,6 +738,12 @@ test('unsupported Claude bridge resets stay unknown without an OAuth lookup', as
     { now, error: 'Claude rate limit (five_hour) — resets 2:00:00 AM: session limit' },
     { now, error: 'Claude rate limit (five_hour): session limit · resets 2am' },
     { now, error: 'Claude rate limit (seven_day): usage limit · resets 2am (Asia/Taipei)' },
+    {
+      now,
+      error:
+        'Claude quota exceeded — rate limit (seven_day): usage limit · resets 2am (Asia/Taipei)',
+    },
+    { now, error: 'Claude quota exceeded — rate limit (five_hour): session limit · resets 2am' },
     { now, error: 'Claude rate limit (five_hour): session limit · resets 13am (Asia/Taipei)' },
     { now, error: 'Claude rate limit (five_hour): session limit · resets 2:60am (Asia/Taipei)' },
     { now, error: 'Claude rate limit (five_hour): session limit · resets 2am (Invalid/Zone)' },
@@ -1470,4 +1476,41 @@ test('synchronous resume enqueue failure cancels instead of staying resuming', a
   assert.ok(
     harness.api.appendedEntries.some((entry) => entry.customType === 'auto-resume/resolved'),
   );
+});
+
+test('session quota error waits for the declared Taipei reset instead of polling', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-16T15:14:20.987Z') });
+  const model = { provider: 'claude-bridge', id: 'claude-opus-5-5', name: 'Claude Opus 5.5' };
+  const harness = makeHarness(model, { mode: 'tui' });
+  try {
+    await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
+    await harness.api.emit(
+      'agent_end',
+      {
+        type: 'agent_end',
+        messages: [
+          assistantError(
+            model,
+            "Claude quota exceeded — rate limit (five_hour) — resets 3:10:00 AM: You've hit your session limit · resets 3:10am (Asia/Taipei)",
+          ),
+        ],
+      },
+      harness.ctx,
+    );
+    await harness.api.emit('agent_settled', { type: 'agent_settled' }, harness.ctx);
+    const pending = harness.api.appendedEntries.find(
+      (entry) => entry.customType === 'auto-resume/pending',
+    );
+    assert.ok(pending?.data, 'the temporary session limit must arm a resume');
+    assert.equal(pending.data['resetAt'], Date.parse('2026-10-16T19:10:00Z'));
+    assert.equal(pending.data['wakeAt'], Date.parse('2026-10-16T19:10:45Z'));
+    assert.equal(pending.data['source'], 'body');
+    assert.equal(pending.data['window'], 'five_hour');
+    assert.equal(pending.data['provider'], model.provider);
+    assert.equal(pending.data['modelId'], model.id);
+    assert.equal(pending.data['attempt'], 1);
+    assert.equal(harness.state.sentMessages.length, 0);
+  } finally {
+    await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
+  }
 });

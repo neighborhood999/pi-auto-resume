@@ -6,7 +6,10 @@ const FIVE_HOURS_MS = 5 * 3_600_000;
  * Unqualified clocks, weekly dates, and ambiguous/nonexistent local times stay unknown.
  */
 export function parseClaudeBridgeReset(errorMessage: string, now: number): number | undefined {
-  if (!errorMessage.startsWith('Claude rate limit (five_hour)') || !Number.isFinite(now)) {
+  if (
+    !/^Claude (?:quota exceeded — )?rate limit \(five_hour\)/.test(errorMessage) ||
+    !Number.isFinite(now)
+  ) {
     return undefined;
   }
   // The bridge prepends a host-local clock without a date or timezone. Only

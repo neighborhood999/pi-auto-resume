@@ -345,7 +345,11 @@ export default function autoResume(
   });
 
   pi.on('before_agent_start', (event) => {
-    if (schedule.phase === 'resuming' && event.prompt === queuedResumePrompt) {
+    if (
+      schedule.phase === 'resuming' &&
+      event.messageType === 'user' &&
+      event.prompt === queuedResumePrompt
+    ) {
       resumePromptPreflight = true;
     }
   });

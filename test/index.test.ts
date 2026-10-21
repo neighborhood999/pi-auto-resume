@@ -230,7 +230,11 @@ async function resumeNow(harness: ReturnType<typeof makeHarness>): Promise<void>
   await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
   const prompt = harness.state.sentMessages.at(-1);
   assert.ok(prompt);
-  await harness.api.emit('before_agent_start', { type: 'before_agent_start', prompt }, harness.ctx);
+  await harness.api.emit(
+    'before_agent_start',
+    { type: 'before_agent_start', messageType: 'user', prompt },
+    harness.ctx,
+  );
   await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
   await harness.api.emit(
     'message_end',
@@ -1002,13 +1006,29 @@ test('first successful assistant message confirms the resume before settlement',
   assert.equal(harness.state.sentMessages.length, 1);
 });
 
-test('an assistant response before the resume prompt starts cannot confirm it', async () => {
+test('a custom-message run before the resume prompt starts cannot confirm it', async () => {
   const model = { provider: 'anthropic', id: 'claude-one', name: 'Claude One' };
   const harness = makeHarness(model);
   await armKnownLimit(harness);
   await harness.api.command?.('now', harness.ctx as unknown as ExtensionCommandContext);
   assert.equal(harness.state.sentMessages.length, 1);
 
+  await harness.api.emit(
+    'before_agent_start',
+    {
+      type: 'before_agent_start',
+      messageType: 'custom',
+      message: {
+        role: 'custom',
+        customType: 'other-extension',
+        content: 'Run another task.',
+        display: false,
+        timestamp: Date.now(),
+      },
+    },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
   await harness.api.emit(
     'message_end',
     { type: 'message_end', message: assistantMessage(model, 'stop') },
@@ -1019,7 +1039,11 @@ test('an assistant response before the resume prompt starts cannot confirm it', 
 
   const prompt = harness.state.sentMessages[0];
   assert.ok(prompt);
-  await harness.api.emit('before_agent_start', { type: 'before_agent_start', prompt }, harness.ctx);
+  await harness.api.emit(
+    'before_agent_start',
+    { type: 'before_agent_start', messageType: 'user', prompt },
+    harness.ctx,
+  );
   await harness.api.emit('agent_start', { type: 'agent_start' }, harness.ctx);
   await harness.api.emit(
     'message_end',

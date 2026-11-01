@@ -382,7 +382,7 @@ export default function autoResume(
       detector.onRunEnd({ _tag: 'NonError' });
       return;
     }
-    if (lastAssistant.stopReason !== 'error' || lastAssistant.errorMessage === undefined) {
+    if (lastAssistant.stopReason !== 'error') {
       const emptyRetry =
         isEmptyAssistantResponse(lastAssistant) &&
         targetModel !== undefined &&
@@ -396,8 +396,10 @@ export default function autoResume(
     detector.onRunEnd({
       _tag: 'Error',
       provider: lastAssistant.provider,
-      errorMessage: lastAssistant.errorMessage,
+      errorMessage: lastAssistant.errorMessage ?? '',
       resetsAt: extractResetsAt(lastAssistant),
+      // Read provider diagnostics across Pi versions without requiring a declared field.
+      diagnostics: (lastAssistant as unknown as Record<string, unknown>)['diagnostics'],
       failedAt: Date.now(),
     });
   });
@@ -503,9 +505,9 @@ export default function autoResume(
       return undefined;
     }
 
-    // Claude bridge runs through Claude Code's SDK, not Pi's Anthropic OAuth
-    // credentials. Its provider key is a placeholder, not a usage-API token.
-    if (guard.target.provider === 'claude-bridge') {
+    // Claude Code owns authentication for these providers; Pi's provider key
+    // is not an Anthropic OAuth token for the usage API.
+    if (guard.target.provider === 'claude-bridge' || guard.target.provider === 'pi-claude-cli') {
       return hit;
     }
 

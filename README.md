@@ -11,7 +11,11 @@ pi install git:github.com/neighborhood999/pi-auto-resume
 ## Supported providers
 
 - `anthropic`
+- `claude-bridge`
+- `pi-claude-cli`
 - `openai-codex`
+
+`pi-claude-cli` reset times come from fresh rejected rate-limit diagnostics on failed assistant messages. Claude Code owns authentication; the extension does not read its credentials or use Pi’s OAuth usage-API fallback for it. Missing reset times use the normal polling interval.
 
 The extension does not resume billing, credit, or plan errors. Those errors do not reset over time.
 

@@ -1,5 +1,6 @@
 import { isAnthropicUsageLimit, parseAnthropicHeaders } from './anthropic.ts';
 import { isCodexUsageLimit, parseCodexErrorBody, parseCodexHeaders } from './codex.ts';
+import { parseClaudeCliLimit } from './claude-cli.ts';
 import { parseClaudeBridgeReset } from './claude-bridge.ts';
 import type { ProviderFamily, UsageLimitHit, UsageLimitWindow } from './types.ts';
 
@@ -12,6 +13,7 @@ export type RunEndObservation =
       readonly errorMessage: string;
       readonly resetsAt: number | undefined;
       readonly failedAt: number;
+      readonly diagnostics?: unknown;
     }
   | { readonly _tag: 'Empty' }
   | { readonly _tag: 'NonError' };
@@ -62,7 +64,7 @@ export function providerFamily(provider: string): ProviderFamily | null {
   if (provider === 'openai-codex') {
     return 'codex';
   }
-  if (provider === 'anthropic' || provider === 'claude-bridge') {
+  if (provider === 'anthropic' || provider === 'claude-bridge' || provider === 'pi-claude-cli') {
     return 'anthropic';
   }
   return null;
@@ -143,6 +145,13 @@ function classifyUsageLimitFailure(
   const family = providerFamily(error.provider);
   if (!family) {
     return undefined;
+  }
+
+  if (error.provider === 'pi-claude-cli') {
+    const diagnosticHit = parseClaudeCliLimit(error.diagnostics, now);
+    if (diagnosticHit) {
+      return diagnosticHit;
+    }
   }
 
   const fresh =

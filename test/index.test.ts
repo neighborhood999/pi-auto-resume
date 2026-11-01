@@ -1538,3 +1538,120 @@ test('session quota error waits for the declared Taipei reset instead of polling
     await harness.api.emit('session_shutdown', { type: 'session_shutdown' }, harness.ctx);
   }
 });
+
+test('Claude CLI diagnostics survive empty retries and resume the exact model', async (t) => {
+  const now = 1_700_000_000_000;
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const model = { provider: 'pi-claude-cli', id: 'claude-opus-4-6', name: 'Claude Opus' };
+  const harness = makeHarness(model);
+  harness.state.getApiKey = async () =>
+    assert.fail('Claude Code credentials must not use Pi OAuth');
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', {}, harness.ctx);
+  });
+  const message = {
+    ...assistantError(model, 'Request rejected'),
+    diagnostics: [
+      {
+        type: 'pi-claude-cli.rate-limit',
+        timestamp: now,
+        details: {
+          status: 'rejected',
+          rateLimitType: 'seven_day',
+          resetsAt: (now + 3_600_000) / 1000,
+        },
+      },
+    ],
+  };
+  await harness.api.emit('agent_start', {}, harness.ctx);
+  await harness.api.emit('agent_end', { messages: [message] }, harness.ctx);
+  await harness.api.emit('agent_start', {}, harness.ctx);
+  await harness.api.emit(
+    'agent_end',
+    { messages: [makeEmptyAssistantResponse(model)] },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', {}, harness.ctx);
+  const pending = harness.api.appendedEntries.find(
+    (entry) => entry.customType === 'auto-resume/pending',
+  );
+  assert.equal(pending?.data?.['provider'], model.provider);
+  assert.equal(pending?.data?.['modelId'], model.id);
+  assert.equal(pending?.data?.['resetAt'], now + 3_600_000);
+  assert.equal(pending?.data?.['window'], 'weekly');
+  assert.equal(pending?.data?.['source'], 'metadata');
+  await resumeNow(harness);
+  assert.equal(harness.state.sentMessages.length, 1);
+  assert.deepEqual(harness.state.model, model);
+  await harness.api.emit('message_end', { message: assistantMessage(model, 'stop') }, harness.ctx);
+  assert.equal(harness.state.bells, 1);
+});
+
+test('Claude CLI limits without reset metadata poll without Pi credential lookup', async (t) => {
+  const harness = makeHarness({ provider: 'pi-claude-cli', id: 'sonnet', name: 'Sonnet' });
+  harness.state.getApiKey = async () => assert.fail('must not request Pi OAuth');
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', {}, harness.ctx);
+  });
+  await harness.api.emit(
+    'agent_end',
+    {
+      messages: [
+        assistantError(
+          { provider: 'pi-claude-cli', id: 'sonnet', name: 'Sonnet' },
+          'rate_limit_error',
+        ),
+      ],
+    },
+    harness.ctx,
+  );
+  await harness.api.emit('agent_settled', {}, harness.ctx);
+  assert.ok(
+    harness.api.appendedEntries.some((entry) => entry.customType === 'auto-resume/pending'),
+  );
+});
+
+test('Claude CLI successful warnings do not arm auto-resume', async (t) => {
+  const harness = makeHarness({ provider: 'pi-claude-cli', id: 'sonnet', name: 'Sonnet' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', {}, harness.ctx);
+  });
+  for (const status of ['allowed', 'allowed_warning', 'rejected']) {
+    const message = {
+      ...assistantMessage({ provider: 'pi-claude-cli', id: 'sonnet', name: 'Sonnet' }, 'stop'),
+      diagnostics: [
+        {
+          type: 'pi-claude-cli.rate-limit',
+          timestamp: Date.now(),
+          details: { status, resetsAt: (Date.now() + 3_600_000) / 1000 },
+        },
+      ],
+    };
+    await harness.api.emit('agent_end', { messages: [message] }, harness.ctx);
+    await harness.api.emit('agent_settled', {}, harness.ctx);
+  }
+  assert.equal(harness.api.appendedEntries.length, 0);
+  assert.equal(harness.state.sentMessages.length, 0);
+});
+
+test('Claude CLI structured rejection works without error text', async (t) => {
+  const harness = makeHarness({ provider: 'pi-claude-cli', id: 'sonnet', name: 'Sonnet' });
+  t.after(async () => {
+    await harness.api.emit('session_shutdown', {}, harness.ctx);
+  });
+  const message = {
+    ...assistantMessage({ provider: 'pi-claude-cli', id: 'sonnet', name: 'Sonnet' }, 'error'),
+    diagnostics: [
+      {
+        type: 'pi-claude-cli.rate-limit',
+        timestamp: Date.now(),
+        details: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+      },
+    ],
+  };
+  await harness.api.emit('agent_end', { messages: [message] }, harness.ctx);
+  await harness.api.emit('agent_settled', {}, harness.ctx);
+  assert.ok(
+    harness.api.appendedEntries.some((entry) => entry.customType === 'auto-resume/pending'),
+  );
+});
